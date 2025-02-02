@@ -1,0 +1,65 @@
+[package]
+name = "rust_thread_system"
+version = "0.1.0"
+edition = "2021"
+authors = ["Author <author@example.com>"]
+description = "A Rust implementation of a thread system for efficient concurrent programming"
+repository = "https://github.com/username/rust_thread_system"
+license = "BSD-3-Clause"
+readme = "README.md"
+keywords = ["threads", "concurrency", "thread-pool", "async", "logging"]
+categories = ["concurrency", "asynchronous"]
+
+[lib]
+name = "rust_thread_system"
+path = "src/lib.rs"
+
+[dependencies]
+# Core dependencies
+thiserror = "1.0"           # Easy error handling
+crossbeam-channel = "0.5"   # Powerful and flexible channels
+crossbeam-queue = "0.3"     # Concurrent queues
+crossbeam-utils = "0.8"     # Utilities for concurrent programming
+parking_lot = "0.12"        # More efficient synchronization primitives
+fastrand = "2.0"           # Fast random number generation for backoff jitter
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }  # Serialization framework
+serde_json = "1.0"          # JSON serialization/deserialization
+
+# Logging and formatting
+chrono = { version = "0.4", features = ["serde"] }  # Date and time handling with serde support
+log = { version = "0.4", features = ["std"] }  # Logging facade with std feature
+tracing = { version = "0.1", optional = true }
+
+# Optional async support
+tokio = { version = "1.32", features = ["full"], optional = true }
+futures = { version = "0.3", optional = true }
+
+[dev-dependencies]
+env_logger = "0.10"          # Simple logger implementation
+criterion = { version = "0.5", features = ["html_reports"] }
+tokio-test = "0.4"
+rand = "0.8"                 # Random number generation
+
+[features]
+default = ["sync"]           # Default is synchronous-only
+sync = []                    # Synchronous operation only
+async = ["tokio", "futures"] # Async support with tokio
+tracing = ["dep:tracing"]    # Tracing support
+
+[[example]]
+name = "basic_thread_pool"
+path = "examples/basic_thread_pool.rs"
+
+[[example]]
+name = "priority_thread_pool"
+path = "examples/priority_thread_pool.rs"
+
+[[example]]
+name = "logger_example"
+path = "examples/logger_example.rs"
+
+[[bench]]
+name = "thread_pool_benchmark"
+harness = false
