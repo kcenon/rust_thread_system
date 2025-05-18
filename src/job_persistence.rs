@@ -21,6 +21,7 @@ use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::log_error;
 use crate::job::{Job, JobBatch};
 
 /// The default directory for storing persisted jobs
@@ -213,14 +214,23 @@ impl JobPersistenceManager {
             .as_secs();
         
         let backup_file = self.persistence_dir.join(format!("backup_{}.json", timestamp));
-        let file = File::create(&backup_file).map_err(PersistenceError::from)?;
+        let file = match File::create(&backup_file) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = log_error!("Failed to create backup file {}: {}", backup_file.display(), e);
+                return Err(PersistenceError::from(e).into());
+            }
+        };
         let writer = BufWriter::new(file);
         
         // Store job ids for backup
         let job_ids: Vec<String> = uncompleted_jobs.keys().cloned().collect();
         
         // Serialize to JSON
-        serde_json::to_writer_pretty(writer, &job_ids).map_err(PersistenceError::from)?;
+        if let Err(e) = serde_json::to_writer_pretty(writer, &job_ids) {
+            let _ = log_error!("Failed to write backup data: {}", e);
+            return Err(PersistenceError::from(e).into());
+        }
         
         info!("Backed up {} jobs to {}", job_ids.len(), backup_file.display());
         
@@ -244,15 +254,30 @@ impl JobPersistenceManager {
     
     /// Persist a job to disk
     pub fn persist_job(&self, job: Arc<dyn PersistableJob>) -> Result<()> {
-        let serializable = job.serialize()?;
+        let serializable = match job.serialize() {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = log_error!("Failed to serialize job: {}", e);
+                return Err(e);
+            }
+        };
         let job_id = serializable.id.clone();
         
         // Save to disk
         let job_file = self.persistence_dir.join(format!("{}.json", job_id));
-        let file = File::create(&job_file).map_err(PersistenceError::from)?;
+        let file = match File::create(&job_file) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = log_error!("Failed to create job file {}: {}", job_file.display(), e);
+                return Err(PersistenceError::from(e).into());
+            }
+        };
         let writer = BufWriter::new(file);
         
-        serde_json::to_writer_pretty(writer, &serializable).map_err(PersistenceError::from)?;
+        if let Err(e) = serde_json::to_writer_pretty(writer, &serializable) {
+            let _ = log_error!("Failed to write job {} to file: {}", job_id, e);
+            return Err(PersistenceError::from(e).into());
+        }
         
         // Add to uncompleted jobs
         let mut uncompleted_jobs = self.uncompleted_jobs.write().map_err(|e| {

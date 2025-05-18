@@ -125,7 +125,7 @@ impl ThreadWorker for BasicThreadWorker {
         let thread_title_for_error = self.title.clone();
         let check_interval = self.check_interval;
         
-        let handle = thread::Builder::new()
+        let handle = match thread::Builder::new()
             .name(thread_title_for_thread.clone())
             .spawn(move || {
                 while running.load(Ordering::SeqCst) {
@@ -159,10 +159,15 @@ impl ThreadWorker for BasicThreadWorker {
                         thread::sleep(check_interval);
                     }
                 }
-            })
-            .map_err(|e| Error::thread_error(
-                format!("Failed to spawn worker thread '{}': {}", thread_title_for_error, e)
-            ))?;
+            }) {
+            Ok(handle) => handle,
+            Err(e) => {
+                self.condition = ThreadCondition::Stopped;
+                return Err(Error::thread_error(
+                    format!("Failed to spawn worker thread '{}': {}", thread_title_for_error, e)
+                ));
+            }
+        };
         
         self.handle = Some(handle);
         Ok(())

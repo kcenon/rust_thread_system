@@ -10,6 +10,7 @@ use std::time::Duration;
 use crate::error::{Error, Result};
 use crate::job::{Job, JobQueue, BasicJobQueue, JobBatch};
 use crate::thread_base::{ThreadWorker, BasicThreadWorker};
+use crate::log_error;
 
 /// Thread pool that manages worker threads and distributes jobs.
 pub struct ThreadPool {
@@ -94,7 +95,10 @@ impl ThreadPool {
             ));
             
             if self.is_running() {
-                worker.start()?;
+                if let Err(e) = worker.start() {
+                    let _ = log_error!("Failed to start worker {}: {}", i, e);
+                    // Continue with other workers
+                }
             }
             
             workers.push(worker);
@@ -110,7 +114,10 @@ impl ThreadPool {
         )?;
         
         if self.is_running() {
-            worker.start()?;
+            if let Err(e) = worker.start() {
+                let _ = log_error!("Failed to start custom worker: {}", e);
+                return Err(e);
+            }
         }
         
         workers.push(worker);
@@ -132,8 +139,11 @@ impl ThreadPool {
             Error::lock_error(format!("Failed to lock workers mutex: {}", e))
         )?;
         
-        for worker in workers.iter_mut() {
-            worker.start()?;
+        for (i, worker) in workers.iter_mut().enumerate() {
+            if let Err(e) = worker.start() {
+                let _ = log_error!("Failed to start worker {} during pool start: {}", i, e);
+                // Continue with other workers
+            }
         }
         
         // If auto-shutdown is enabled, start a monitoring thread to check for completion
@@ -216,7 +226,10 @@ impl ThreadPool {
         }
         
         for job in batch.into_jobs() {
-            self.job_queue.enqueue(job)?;
+            if let Err(e) = self.job_queue.enqueue(job) {
+                let _ = log_error!("Failed to enqueue job from batch: {}", e);
+                return Err(e);
+            }
         }
         
         Ok(())

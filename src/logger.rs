@@ -3,12 +3,12 @@
 //! This module provides a thread-safe logging system with support for multiple
 //! backends (console, file, callback) and log levels.
 
+use std::path::{PathBuf};
+use std::io::Write;
 use std::fs::OpenOptions;
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use std::io::Write;
 use std::thread;
 
 use chrono::Local;
@@ -285,13 +285,14 @@ impl Logger {
         // and fans out to all enabled backends
         let stop_flag = Arc::new(AtomicBool::new(false));
         let dispatch_stop_flag = stop_flag.clone();
+        let dispatch_stop_flag_for_error = stop_flag.clone();
         
         // Create a worker container for the dispatcher
         let mut dispatch_worker = LogWorker::new();
         dispatch_worker.stop_flag = stop_flag;
         
         // Create dispatcher thread that ensures ALL messages go to ALL backends
-        let handle = thread::Builder::new()
+        let handle = match thread::Builder::new()
             .name("log_dispatcher".to_string())
             .spawn(move || {
                 println!("Log dispatcher started");
@@ -334,15 +335,29 @@ impl Logger {
                 }
                 
                 println!("Log dispatcher finished");
-            })
-            .map_err(|e| Error::thread_error(format!("Failed to start dispatcher: {}", e)))?;
+            }) {
+                Ok(handle) => handle,
+                Err(e) => {
+                    dispatch_stop_flag_for_error.store(true, Ordering::SeqCst);
+                    return Err(Error::thread_error(format!("Failed to start dispatcher: {}", e)));
+                }
+            };
             
         dispatch_worker.handle = Some(handle);
         
         // Start the individual output workers
-        self.setup_console_worker(console_receiver)?;
-        self.setup_file_worker(file_receiver)?;
-        self.setup_callback_worker(callback_receiver)?;
+        if let Err(e) = self.setup_console_worker(console_receiver) {
+            eprintln!("Failed to setup console worker: {}", e);
+            // Continue with other workers
+        }
+        if let Err(e) = self.setup_file_worker(file_receiver) {
+            eprintln!("Failed to setup file worker: {}", e);
+            // Continue with other workers
+        }
+        if let Err(e) = self.setup_callback_worker(callback_receiver) {
+            eprintln!("Failed to setup callback worker: {}", e);
+            // Continue with other workers
+        }
         
         // Store the dispatcher worker
         *self.console_worker.lock().map_err(|e| 
@@ -442,9 +457,10 @@ impl Logger {
         
         let mut worker = LogWorker::new();
         let stop_flag = worker.stop_flag.clone();
+        let stop_flag_for_error = worker.stop_flag.clone();
         
         // Spawn the worker thread
-        let handle = thread::Builder::new()
+        let handle = match thread::Builder::new()
             .name("console_logger".to_string())
             .spawn(move || {
                 // Buffer no longer needed with direct processing
@@ -499,8 +515,13 @@ impl Logger {
                 
                 // Clean up before terminating
                 println!("Console log worker is shutting down");
-            })
-            .map_err(|e| Error::thread_error(format!("Failed to start console worker: {}", e)))?;
+            }) {
+                Ok(handle) => handle,
+                Err(e) => {
+                    stop_flag_for_error.store(true, Ordering::SeqCst);
+                    return Err(Error::thread_error(format!("Failed to start console worker: {}", e)));
+                }
+            };
         
         worker.handle = Some(handle);
         
@@ -536,8 +557,9 @@ impl Logger {
         
         let mut worker = LogWorker::new();
         let stop_flag = worker.stop_flag.clone();
+        let stop_flag_for_error = worker.stop_flag.clone();
         
-        let handle = thread::Builder::new()
+        let handle = match thread::Builder::new()
             .name("file_logger".to_string())
             .spawn(move || {
                 // Buffer no longer needed with direct processing
@@ -564,7 +586,7 @@ impl Logger {
                                     eprintln!("Failed to open log file (attempt {}/{}): {}", 
                                         attempt + 1, retries, e);
                                     // Recreate directory and pause before retry
-                                    let _ = std::fs::create_dir_all(path.parent().unwrap_or_else(|| Path::new(".")));
+                                    let _ = std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new(".")));
                                     std::thread::sleep(std::time::Duration::from_millis(50 * (attempt as u64 + 1)));
                                 } else {
                                     eprintln!("Final attempt to open log file failed: {}", e);
@@ -771,8 +793,13 @@ impl Logger {
                 }
                 
                 println!("File log worker is shutting down");
-            })
-            .map_err(|e| Error::thread_error(format!("Failed to start file worker: {}", e)))?;
+            }) {
+                Ok(handle) => handle,
+                Err(e) => {
+                    stop_flag_for_error.store(true, Ordering::SeqCst);
+                    return Err(Error::thread_error(format!("Failed to start file worker: {}", e)));
+                }
+            };
         
         worker.handle = Some(handle);
         
@@ -812,8 +839,9 @@ impl Logger {
         
         let mut worker = LogWorker::new();
         let stop_flag = worker.stop_flag.clone();
+        let stop_flag_for_error = worker.stop_flag.clone();
         
-        let handle = thread::Builder::new()
+        let handle = match thread::Builder::new()
             .name("callback_logger".to_string())
             .spawn(move || {
                 // Buffer no longer needed with direct processing
@@ -865,8 +893,13 @@ impl Logger {
                 
                 // Clean up before terminating
                 println!("Callback log worker is shutting down");
-            })
-            .map_err(|e| Error::thread_error(format!("Failed to start callback worker: {}", e)))?;
+            }) {
+                Ok(handle) => handle,
+                Err(e) => {
+                    stop_flag_for_error.store(true, Ordering::SeqCst);
+                    return Err(Error::thread_error(format!("Failed to start callback worker: {}", e)));
+                }
+            };
         
         worker.handle = Some(handle);
         

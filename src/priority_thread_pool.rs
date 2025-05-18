@@ -13,6 +13,7 @@ use parking_lot::RwLock;
 
 use crate::error::{Error, Result};
 use crate::job::{Job, JobQueue};
+use crate::log_error;
 use crate::thread_base::{ThreadWorker, BasicThreadWorker};
 
 /// Job priority levels
@@ -267,7 +268,10 @@ impl PriorityThreadPool {
             ));
             
             if self.is_running() {
-                worker.start()?;
+                if let Err(e) = worker.start() {
+                    let _ = log_error!("Failed to start priority worker {}: {}", i, e);
+                    // Continue with other workers
+                }
             }
             
             workers.push(worker);
@@ -283,7 +287,10 @@ impl PriorityThreadPool {
         )?;
         
         if self.is_running() {
-            worker.start()?;
+            if let Err(e) = worker.start() {
+                let _ = log_error!("Failed to start custom priority worker: {}", e);
+                return Err(e);
+            }
         }
         
         workers.push(worker);
@@ -324,8 +331,11 @@ impl PriorityThreadPool {
             Error::lock_error(format!("Failed to lock workers mutex: {}", e))
         )?;
         
-        for worker in workers.iter_mut() {
-            worker.start()?;
+        for (i, worker) in workers.iter_mut().enumerate() {
+            if let Err(e) = worker.start() {
+                let _ = log_error!("Failed to start priority worker {} during pool start: {}", i, e);
+                // Continue with other workers
+            }
         }
         
         Ok(())
