@@ -453,6 +453,31 @@ impl<T: Job> MonitoredJob<T> {
 }
 
 impl<T: Job + 'static> Job for MonitoredJob<T> {
+    fn execute_with_context(&self, context: &crate::job::JobContext) -> Result<()> {
+        // Check for cancellation before execution
+        if context.is_cancelled() {
+            let _ = self.monitor.mark_failed(self.job_id, "Job was cancelled".to_string());
+            return Err(crate::error::Error::JobCancelled);
+        }
+        
+        // Mark job as started
+        let _ = self.monitor.mark_started(self.job_id);
+        
+        // Execute the actual job
+        match self.job.execute_with_context(context) {
+            Ok(()) => {
+                // Mark job as completed
+                let _ = self.monitor.mark_completed(self.job_id);
+                Ok(())
+            }
+            Err(e) => {
+                // Mark job as failed with error message
+                let _ = self.monitor.mark_failed(self.job_id, e.to_string());
+                Err(e)
+            }
+        }
+    }
+    
     fn execute(&self) -> Result<()> {
         // Mark job as started
         let _ = self.monitor.mark_started(self.job_id);

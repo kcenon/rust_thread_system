@@ -15,7 +15,7 @@
 //! ## Example
 //!
 //! ```
-//! use rust_thread_system::{ThreadPool, job::CallbackJob};
+//! use rust_thread_system::{ThreadPool, job::{CallbackJob, JobContext, JobId}};
 //! use std::time::Duration;
 //!
 //! # fn main() -> Result<(), rust_thread_system::error::Error> {
@@ -55,6 +55,7 @@ pub mod job_pool_stats;
 pub mod job_persistence;
 pub mod backoff;
 pub mod job_monitor;
+pub mod metrics;
 
 // Re-exports of commonly used types
 pub use thread_pool::ThreadPool;
@@ -70,8 +71,9 @@ pub use backoff::{
     BackoffStrategy, RetryPolicy, ConstantBackoff, LinearBackoff, 
     ExponentialBackoff, CompositeBackoff
 };
-pub use job::RetryableJob;
+pub use job::{RetryableJob, JobId, JobContext, ContextCallbackJob};
 pub use job_monitor::{JobMonitor, JobMonitorConfig, MonitoredJob, JobStats};
+pub use metrics::{ThreadPoolMetrics, MetricsSnapshot};
 
 /// Returns the version of the library
 pub fn version() -> &'static str {

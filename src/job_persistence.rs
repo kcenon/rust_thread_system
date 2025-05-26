@@ -679,6 +679,14 @@ impl PersistableCallbackJob {
 }
 
 impl Job for PersistableCallbackJob {
+    fn execute_with_context(&self, context: &crate::job::JobContext) -> Result<()> {
+        // Check for cancellation before execution
+        if context.is_cancelled() {
+            return Err(crate::error::Error::JobCancelled);
+        }
+        (self.executor)()
+    }
+    
     fn execute(&self) -> Result<()> {
         (self.executor)()
     }

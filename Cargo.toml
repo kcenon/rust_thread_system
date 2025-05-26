@@ -1,13 +1,13 @@
 [package]
 name = "rust_thread_system"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Author <author@example.com>"]
-description = "A Rust implementation of a thread system for efficient concurrent programming"
+description = "Enhanced Rust thread system with advanced features like job cancellation, metrics, and priority scheduling"
 repository = "https://github.com/username/rust_thread_system"
 license = "BSD-3-Clause"
 readme = "README.md"
-keywords = ["threads", "concurrency", "thread-pool", "async", "logging"]
+keywords = ["threads", "concurrency", "thread-pool", "async", "logging", "metrics", "cancellation"]
 categories = ["concurrency", "asynchronous"]
 
 [lib]
@@ -20,8 +20,13 @@ thiserror = "1.0"           # Easy error handling
 crossbeam-channel = "0.5"   # Powerful and flexible channels
 crossbeam-queue = "0.3"     # Concurrent queues
 crossbeam-utils = "0.8"     # Utilities for concurrent programming
+crossbeam = "0.8"           # Complete crossbeam suite
 parking_lot = "0.12"        # More efficient synchronization primitives
 fastrand = "2.0"           # Fast random number generation for backoff jitter
+
+# Enhanced features from thread_pool
+uuid = { version = "1.0", features = ["v4", "serde"] }  # Unique job identifiers
+dashmap = { version = "5.5", optional = true }          # Concurrent hashmap for metrics
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }  # Serialization framework
@@ -32,7 +37,7 @@ chrono = { version = "0.4", features = ["serde"] }  # Date and time handling wit
 log = { version = "0.4", features = ["std"] }  # Logging facade with std feature
 tracing = { version = "0.1", optional = true }
 
-# Optional async support
+# Enhanced async support
 tokio = { version = "1.32", features = ["full"], optional = true }
 futures = { version = "0.3", optional = true }
 
@@ -43,10 +48,11 @@ tokio-test = "0.4"
 rand = "0.8"                 # Random number generation
 
 [features]
-default = ["sync"]           # Default is synchronous-only
-sync = []                    # Synchronous operation only
-async = ["tokio", "futures"] # Async support with tokio
-tracing = ["dep:tracing"]    # Tracing support
+default = ["sync", "metrics"]           # Default includes metrics
+sync = []                               # Synchronous operation only
+async = ["tokio", "futures"]            # Async support with tokio
+tracing = ["dep:tracing"]               # Tracing support
+metrics = ["dep:dashmap"]               # Metrics collection with dashmap
 
 [[example]]
 name = "basic_thread_pool"

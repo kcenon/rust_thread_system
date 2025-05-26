@@ -16,29 +16,35 @@ use crate::job::{Job, JobQueue};
 use crate::log_error;
 use crate::thread_base::{ThreadWorker, BasicThreadWorker};
 
-/// Job priority levels
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// Job priority levels (compatible with enhanced thread_pool)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub enum JobPriority {
-    /// Lowest priority
-    Lowest = 0,
+    /// Idle priority - lowest precedence
+    Idle = 0,
     /// Low priority
     Low = 1,
-    /// Normal priority
+    /// Normal priority (default)
     Normal = 2,
     /// High priority
     High = 3,
-    /// Highest priority
-    Highest = 4,
+    /// Critical priority - highest precedence
+    Critical = 4,
+}
+
+impl Default for JobPriority {
+    fn default() -> Self {
+        JobPriority::Normal
+    }
 }
 
 impl fmt::Display for JobPriority {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            JobPriority::Lowest => write!(f, "Lowest"),
+            JobPriority::Idle => write!(f, "Idle"),
             JobPriority::Low => write!(f, "Low"),
             JobPriority::Normal => write!(f, "Normal"),
             JobPriority::High => write!(f, "High"),
-            JobPriority::Highest => write!(f, "Highest"),
+            JobPriority::Critical => write!(f, "Critical"),
         }
     }
 }
@@ -67,6 +73,10 @@ impl PriorityJob {
 }
 
 impl Job for PriorityJob {
+    fn execute_with_context(&self, context: &crate::job::JobContext) -> Result<()> {
+        self.job.execute_with_context(context)
+    }
+    
     fn execute(&self) -> Result<()> {
         self.job.execute()
     }

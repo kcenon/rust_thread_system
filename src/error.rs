@@ -20,6 +20,10 @@ pub enum Error {
     #[error("Job execution failed: {0}")]
     JobError(String),
     
+    /// Job was cancelled during execution
+    #[error("Job was cancelled")]
+    JobCancelled,
+    
     /// Job queue operations failed
     #[error("Job queue error: {0}")]
     QueueError(String),

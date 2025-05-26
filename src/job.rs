@@ -6,15 +6,89 @@
 use std::any::Any;
 use std::fmt;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
+
+use uuid::Uuid;
+use serde::{Serialize, Deserialize};
 
 use crate::backoff::RetryPolicy;
 use crate::error::{Error, Result};
 
+/// Unique identifier for jobs
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct JobId(pub Uuid);
+
+impl JobId {
+    /// Create a new unique job ID
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+impl Default for JobId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for JobId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Token for cancelling job execution
+pub type CancellationToken = Arc<AtomicBool>;
+
+/// Context information for job execution
+#[derive(Debug, Clone)]
+pub struct JobContext {
+    /// Unique job identifier
+    pub id: JobId,
+    /// Token for cancelling the job
+    pub cancellation_token: CancellationToken,
+    /// When the job was submitted
+    pub submitted_at: Instant,
+}
+
+impl JobContext {
+    /// Create a new job context
+    pub fn new() -> Self {
+        Self {
+            id: JobId::new(),
+            cancellation_token: Arc::new(AtomicBool::new(false)),
+            submitted_at: Instant::now(),
+        }
+    }
+    
+    /// Check if the job has been cancelled
+    pub fn is_cancelled(&self) -> bool {
+        self.cancellation_token.load(Ordering::Relaxed)
+    }
+    
+    /// Cancel the job
+    pub fn cancel(&self) {
+        self.cancellation_token.store(true, Ordering::Relaxed);
+    }
+}
+
+impl Default for JobContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Job trait representing a unit of work that can be executed by a worker thread.
 pub trait Job: Send + Sync + fmt::Debug {
-    /// Execute the job and return a result.
-    fn execute(&self) -> Result<()>;
+    /// Execute the job with context and return a result.
+    fn execute_with_context(&self, context: &JobContext) -> Result<()>;
+    
+    /// Execute the job and return a result (for backward compatibility).
+    fn execute(&self) -> Result<()> {
+        let context = JobContext::new();
+        self.execute_with_context(&context)
+    }
     
     /// Returns a string description of this job.
     fn description(&self) -> String;
@@ -24,6 +98,11 @@ pub trait Job: Send + Sync + fmt::Debug {
     
     /// Return self as a trait object for downcasting.
     fn as_any(&self) -> &dyn std::any::Any;
+    
+    /// Get the job's context if available
+    fn get_context(&self) -> Option<&JobContext> {
+        None
+    }
 }
 
 /// A basic job implementation that wraps a closure.
@@ -39,6 +118,27 @@ where
     
     /// When the job was created.
     creation_time: Instant,
+    
+    /// Job context for cancellation and tracking
+    context: JobContext,
+}
+
+/// Enhanced callback job that can access the job context
+pub struct ContextCallbackJob<F>
+where
+    F: Fn(&JobContext) -> Result<()> + Send + Sync + 'static,
+{
+    /// The callback function to execute with context.
+    callback: F,
+    
+    /// Description of the job.
+    description: String,
+    
+    /// When the job was created.
+    creation_time: Instant,
+    
+    /// Job context for cancellation and tracking
+    context: JobContext,
 }
 
 impl<F> CallbackJob<F>
@@ -51,7 +151,73 @@ where
             callback,
             description: description.into(),
             creation_time: Instant::now(),
+            context: JobContext::new(),
         }
+    }
+    
+    /// Create a new callback job with a specific context.
+    pub fn with_context(callback: F, description: impl Into<String>, context: JobContext) -> Self {
+        Self {
+            callback,
+            description: description.into(),
+            creation_time: Instant::now(),
+            context,
+        }
+    }
+    
+    /// Get the job's unique ID
+    pub fn job_id(&self) -> &JobId {
+        &self.context.id
+    }
+    
+    /// Cancel this job
+    pub fn cancel(&self) {
+        self.context.cancel();
+    }
+    
+    /// Check if this job is cancelled
+    pub fn is_cancelled(&self) -> bool {
+        self.context.is_cancelled()
+    }
+}
+
+impl<F> ContextCallbackJob<F>
+where
+    F: Fn(&JobContext) -> Result<()> + Send + Sync + 'static,
+{
+    /// Create a new context-aware callback job.
+    pub fn new(callback: F, description: impl Into<String>) -> Self {
+        Self {
+            callback,
+            description: description.into(),
+            creation_time: Instant::now(),
+            context: JobContext::new(),
+        }
+    }
+    
+    /// Create a new context-aware callback job with a specific context.
+    pub fn with_context(callback: F, description: impl Into<String>, context: JobContext) -> Self {
+        Self {
+            callback,
+            description: description.into(),
+            creation_time: Instant::now(),
+            context,
+        }
+    }
+    
+    /// Get the job's unique ID
+    pub fn job_id(&self) -> &JobId {
+        &self.context.id
+    }
+    
+    /// Cancel this job
+    pub fn cancel(&self) {
+        self.context.cancel();
+    }
+    
+    /// Check if this job is cancelled
+    pub fn is_cancelled(&self) -> bool {
+        self.context.is_cancelled()
     }
 }
 
@@ -59,8 +225,17 @@ impl<F> Job for CallbackJob<F>
 where
     F: Fn() -> Result<()> + Send + Sync + 'static,
 {
-    fn execute(&self) -> Result<()> {
+    fn execute_with_context(&self, context: &JobContext) -> Result<()> {
+        // Check for cancellation before execution
+        if context.is_cancelled() {
+            return Err(Error::JobCancelled);
+        }
+        
         (self.callback)()
+    }
+    
+    fn execute(&self) -> Result<()> {
+        self.execute_with_context(&self.context)
     }
     
     fn description(&self) -> String {
@@ -74,6 +249,44 @@ where
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+    
+    fn get_context(&self) -> Option<&JobContext> {
+        Some(&self.context)
+    }
+}
+
+impl<F> Job for ContextCallbackJob<F>
+where
+    F: Fn(&JobContext) -> Result<()> + Send + Sync + 'static,
+{
+    fn execute_with_context(&self, context: &JobContext) -> Result<()> {
+        // Check for cancellation before execution
+        if context.is_cancelled() {
+            return Err(Error::JobCancelled);
+        }
+        
+        (self.callback)(context)
+    }
+    
+    fn execute(&self) -> Result<()> {
+        self.execute_with_context(&self.context)
+    }
+    
+    fn description(&self) -> String {
+        self.description.clone()
+    }
+    
+    fn creation_time(&self) -> Instant {
+        self.creation_time
+    }
+    
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    
+    fn get_context(&self) -> Option<&JobContext> {
+        Some(&self.context)
+    }
 }
 
 impl<F> fmt::Debug for CallbackJob<F>
@@ -84,6 +297,20 @@ where
         f.debug_struct("CallbackJob")
             .field("description", &self.description)
             .field("creation_time", &format!("{:?}", self.creation_time))
+            .field("context", &self.context)
+            .finish()
+    }
+}
+
+impl<F> fmt::Debug for ContextCallbackJob<F>
+where
+    F: Fn(&JobContext) -> Result<()> + Send + Sync + 'static,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ContextCallbackJob")
+            .field("description", &self.description)
+            .field("creation_time", &format!("{:?}", self.creation_time))
+            .field("context", &self.context)
             .finish()
     }
 }
@@ -289,7 +516,12 @@ impl<J: Job> RetryableJob<J> {
 }
 
 impl<J: Job + 'static> Job for RetryableJob<J> {
-    fn execute(&self) -> Result<()> {
+    fn execute_with_context(&self, context: &JobContext) -> Result<()> {
+        // Check for cancellation before execution
+        if context.is_cancelled() {
+            return Err(Error::JobCancelled);
+        }
+        
         // Increment the attempt counter
         let mut attempt = self.current_attempt.lock().unwrap();
         *attempt += 1;
@@ -297,7 +529,7 @@ impl<J: Job + 'static> Job for RetryableJob<J> {
         drop(attempt); // Release the lock
         
         // Execute the inner job
-        match self.inner.execute() {
+        match self.inner.execute_with_context(context) {
             Ok(()) => Ok(()),
             Err(e) => {
                 // Job failed, handle retry logic
