@@ -1,0 +1,30 @@
+[package]
+name = "rust_thread_system"
+version = "0.1.0"
+edition = "2021"
+authors = ["Thread System Team"]
+license = "BSD-3-Clause"
+description = "A production-ready, high-performance Rust threading framework with worker pools and job queues"
+repository = "https://github.com/kcenon/rust_thread_system"
+keywords = ["thread", "pool", "worker", "concurrency", "async"]
+categories = ["concurrency"]
+
+[features]
+default = []
+# Enable priority-based job scheduling (experimental)
+# Note: Not yet integrated with ThreadPool
+priority-scheduling = []
+
+[dependencies]
+crossbeam = "0.8"
+parking_lot = "0.12"
+thiserror = "2.0"
+num_cpus = "1.16"
+
+[dev-dependencies]
+criterion = "0.5"
+proptest = "1.4"
+
+[[bench]]
+name = "thread_pool_benchmarks"
+harness = false
