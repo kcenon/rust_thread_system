@@ -3,4 +3,7 @@
 pub use crate::core::{
     BoxedJob, CancellationToken, ClosureJob, Job, JobHandle, Result, ThreadError,
 };
-pub use crate::pool::{ThreadPool, ThreadPoolConfig, WorkerStats};
+pub use crate::pool::{
+    BackpressureStrategy, JobResult, PoolStats, ThreadPool, ThreadPoolBuilder, ThreadPoolConfig,
+    WorkerStats, WorkerStatSnapshot,
+};

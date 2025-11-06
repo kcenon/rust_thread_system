@@ -73,6 +73,51 @@ impl WorkerStats {
             0.0
         }
     }
+
+    /// Get total processing time in microseconds
+    pub fn get_total_processing_time_us(&self) -> u64 {
+        self.total_processing_time_us.load(Ordering::Relaxed)
+    }
+
+    /// Create a snapshot of current statistics
+    ///
+    /// This is more efficient than calling individual getters separately,
+    /// as it creates a consistent snapshot of all statistics at once.
+    pub fn snapshot(&self) -> WorkerStatSnapshot {
+        WorkerStatSnapshot {
+            jobs_processed: self.jobs_processed.load(Ordering::Relaxed),
+            jobs_failed: self.jobs_failed.load(Ordering::Relaxed),
+            jobs_panicked: self.jobs_panicked.load(Ordering::Relaxed),
+            total_processing_time_us: self.total_processing_time_us.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// A snapshot of worker statistics at a point in time
+///
+/// This is a plain data structure without atomics, suitable for
+/// returning from APIs and serialization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkerStatSnapshot {
+    /// Total number of jobs processed
+    pub jobs_processed: u64,
+    /// Total number of jobs that failed
+    pub jobs_failed: u64,
+    /// Total number of jobs that panicked
+    pub jobs_panicked: u64,
+    /// Total time spent processing jobs (microseconds)
+    pub total_processing_time_us: u64,
+}
+
+impl WorkerStatSnapshot {
+    /// Get average processing time per job in microseconds
+    pub fn average_processing_time_us(&self) -> f64 {
+        if self.jobs_processed > 0 {
+            self.total_processing_time_us as f64 / self.jobs_processed as f64
+        } else {
+            0.0
+        }
+    }
 }
 
 /// A worker thread that processes jobs from a queue
