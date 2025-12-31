@@ -10,6 +10,8 @@ use crate::queue::{
     BackpressureStrategy, BoundedQueue, CapabilityFlags, ChannelQueue, JobQueue, QueueCapabilities,
     QueueError, QueueFactory, QueueRequirements,
 };
+#[cfg(feature = "tracing")]
+use crate::tracing::TracedJob;
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -502,6 +504,10 @@ impl ThreadPool {
     /// This method uses interior mutability and can be called from `&self`.
     /// Multiple concurrent calls are safe - only the first will succeed,
     /// others will receive an `AlreadyRunning` error.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(
+        workers = %self.config.num_threads,
+        prefix = %self.config.thread_name_prefix
+    )))]
     pub fn start(&self) -> Result<()> {
         // Atomically check and set running flag to prevent race condition
         if self
@@ -544,7 +550,13 @@ impl ThreadPool {
         }
 
         *self.workers.write() = workers;
-        *self.queue.write() = Some(queue);
+        *self.queue.write() = Some(Arc::clone(&queue));
+
+        #[cfg(feature = "tracing")]
+        crate::tracing::metrics::record_pool_start(
+            self.config.num_threads,
+            queue.capabilities().implementation_name,
+        );
 
         Ok(())
     }
@@ -559,8 +571,39 @@ impl ThreadPool {
     /// - [`DropOldest`](BackpressureStrategy::DropOldest): Not supported by standard queue, falls back to block
     /// - [`DropNewest`](BackpressureStrategy::DropNewest): Silently drop if queue is full
     /// - [`Custom`](BackpressureStrategy::Custom): Delegate to custom handler
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self, job), fields(job_type = %job.job_type())))]
     pub fn submit<J: Job + 'static>(&self, job: J) -> Result<()> {
+        #[cfg(feature = "tracing")]
+        tracing::trace!("submitting job");
+
         self.submit_with_backpressure(Box::new(job))
+    }
+
+    /// Submit a job with tracing context propagation.
+    ///
+    /// The current tracing span is captured and will be entered when the job
+    /// executes on a worker thread. This enables distributed tracing across
+    /// thread boundaries.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use rust_thread_system::prelude::*;
+    ///
+    /// let pool = ThreadPool::with_threads(4)?;
+    /// pool.start()?;
+    ///
+    /// tracing::info_span!("my_operation").in_scope(|| {
+    ///     // Context is automatically propagated
+    ///     pool.submit_traced(MyJob::new())?;
+    ///     Ok::<_, ThreadError>(())
+    /// })?;
+    /// ```
+    #[cfg(feature = "tracing")]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self, job), fields(job_type = %job.job_type())))]
+    pub fn submit_traced<J: Job + 'static>(&self, job: J) -> Result<()> {
+        tracing::trace!("submitting traced job");
+        self.submit_with_backpressure(Box::new(TracedJob::new(job)))
     }
 
     /// Internal method to submit a boxed job with backpressure handling
@@ -666,6 +709,15 @@ impl ThreadPool {
 
         if result.is_ok() {
             self.total_jobs_submitted.fetch_add(1, Ordering::Relaxed);
+            #[cfg(feature = "tracing")]
+            {
+                let queue_depth = queue.len();
+                crate::tracing::metrics::record_submission(queue_depth);
+                tracing::debug!(queue_depth = queue_depth, "job submitted successfully");
+            }
+        } else {
+            #[cfg(feature = "tracing")]
+            tracing::warn!("job submission failed");
         }
         result
     }
@@ -1196,10 +1248,14 @@ impl ThreadPool {
     /// This method uses interior mutability and can be called from `&self`.
     /// Multiple concurrent calls are safe - only the first will perform the
     /// shutdown, others will return immediately.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
     pub fn shutdown(&self) -> Result<()> {
         if !self.running.load(Ordering::Acquire) {
             return Ok(());
         }
+
+        #[cfg(feature = "tracing")]
+        tracing::info!("initiating thread pool shutdown");
 
         // Mark as not running first to prevent new job submissions
         self.running.store(false, Ordering::Release);
@@ -1217,6 +1273,12 @@ impl ThreadPool {
 
         // Clear the queue reference
         *self.queue.write() = None;
+
+        #[cfg(feature = "tracing")]
+        crate::tracing::metrics::record_pool_shutdown(
+            self.total_jobs_processed(),
+            self.total_jobs_failed(),
+        );
 
         Ok(())
     }
