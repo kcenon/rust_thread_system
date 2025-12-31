@@ -25,11 +25,15 @@
 //!
 //! [`ThreadPool`]: crate::pool::ThreadPool
 
+mod backpressure;
 mod bounded;
 mod channel;
 #[cfg(feature = "priority-scheduling")]
 mod priority;
 
+pub use backpressure::{
+    BackpressureHandler, BackpressureStats, BackpressureStatsSnapshot, BackpressureStrategy,
+};
 pub use bounded::BoundedQueue;
 pub use channel::ChannelQueue;
 #[cfg(feature = "priority-scheduling")]

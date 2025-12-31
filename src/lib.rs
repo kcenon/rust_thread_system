@@ -122,7 +122,10 @@ pub use core::{Priority, PriorityJob, PriorityQueue};
 pub use pool::{ThreadPool, ThreadPoolConfig, WorkerStats};
 #[cfg(feature = "priority-scheduling")]
 pub use queue::PriorityJobQueue;
-pub use queue::{BoundedQueue, ChannelQueue, JobQueue, QueueCapabilities, QueueError, QueueResult};
+pub use queue::{
+    BackpressureHandler, BackpressureStats, BackpressureStatsSnapshot, BackpressureStrategy,
+    BoundedQueue, ChannelQueue, JobQueue, QueueCapabilities, QueueError, QueueResult,
+};
 pub use typed::{
     DefaultJobType, JobType, TypeStats, TypedClosureJob, TypedJob, TypedPoolConfig, TypedThreadPool,
 };

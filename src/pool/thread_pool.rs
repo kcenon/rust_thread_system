@@ -6,7 +6,7 @@ use crate::core::{CancellationToken, ClosureJob, Job, JobHandle, Result, ThreadE
 use crate::pool::worker::{Worker, WorkerStats};
 #[cfg(feature = "priority-scheduling")]
 use crate::queue::PriorityJobQueue;
-use crate::queue::{BoundedQueue, ChannelQueue, JobQueue, QueueError};
+use crate::queue::{BackpressureStrategy, BoundedQueue, ChannelQueue, JobQueue, QueueError};
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -29,6 +29,9 @@ pub struct ThreadPoolConfig {
     pub poll_interval: Duration,
     /// Custom queue implementation (if None, uses default based on max_queue_size)
     queue: Option<Arc<dyn JobQueue>>,
+    /// Backpressure strategy for bounded queues.
+    /// Default: Block
+    pub backpressure_strategy: BackpressureStrategy,
     /// Enable priority scheduling (requires `priority-scheduling` feature).
     /// When enabled, uses PriorityJobQueue instead of the default queue.
     /// Default: false
@@ -44,7 +47,8 @@ impl std::fmt::Debug for ThreadPoolConfig {
             .field("max_queue_size", &self.max_queue_size)
             .field("thread_name_prefix", &self.thread_name_prefix)
             .field("poll_interval", &self.poll_interval)
-            .field("queue", &self.queue.as_ref().map(|_| "<custom queue>"));
+            .field("queue", &self.queue.as_ref().map(|_| "<custom queue>"))
+            .field("backpressure_strategy", &self.backpressure_strategy);
         #[cfg(feature = "priority-scheduling")]
         debug.field("enable_priority", &self.enable_priority);
         debug.finish()
@@ -61,6 +65,7 @@ impl Default for ThreadPoolConfig {
             thread_name_prefix: "worker".to_string(),
             poll_interval: Duration::from_millis(100),
             queue: None,
+            backpressure_strategy: BackpressureStrategy::default(),
             #[cfg(feature = "priority-scheduling")]
             enable_priority: false,
         }
@@ -116,6 +121,74 @@ impl ThreadPoolConfig {
         assert!(!interval.is_zero(), "poll interval must be non-zero");
         self.poll_interval = interval;
         self
+    }
+
+    /// Set the backpressure strategy for bounded queues.
+    ///
+    /// This controls how the pool handles job submissions when the queue is full.
+    ///
+    /// # Arguments
+    ///
+    /// * `strategy` - The backpressure strategy to use
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use rust_thread_system::prelude::*;
+    /// use rust_thread_system::queue::BackpressureStrategy;
+    /// use std::time::Duration;
+    ///
+    /// // Reject immediately for real-time systems
+    /// let config = ThreadPoolConfig::default()
+    ///     .with_max_queue_size(1000)
+    ///     .with_backpressure_strategy(BackpressureStrategy::RejectImmediately);
+    ///
+    /// // Timeout for web servers
+    /// let config = ThreadPoolConfig::default()
+    ///     .with_max_queue_size(5000)
+    ///     .with_backpressure_strategy(BackpressureStrategy::BlockWithTimeout(Duration::from_secs(5)));
+    /// ```
+    #[must_use = "builder methods return a new value and do not modify the original"]
+    pub fn with_backpressure_strategy(mut self, strategy: BackpressureStrategy) -> Self {
+        self.backpressure_strategy = strategy;
+        self
+    }
+
+    /// Configure the pool to reject jobs immediately when the queue is full.
+    ///
+    /// This is a convenience method equivalent to:
+    /// ```rust,ignore
+    /// config.with_backpressure_strategy(BackpressureStrategy::RejectImmediately)
+    /// ```
+    ///
+    /// # Use Cases
+    ///
+    /// - Real-time systems where waiting is not acceptable
+    /// - Systems that need immediate feedback on queue capacity
+    /// - Load shedding scenarios
+    #[must_use = "builder methods return a new value and do not modify the original"]
+    pub fn reject_when_full(self) -> Self {
+        self.with_backpressure_strategy(BackpressureStrategy::RejectImmediately)
+    }
+
+    /// Configure the pool to block with a timeout when the queue is full.
+    ///
+    /// This is a convenience method equivalent to:
+    /// ```rust,ignore
+    /// config.with_backpressure_strategy(BackpressureStrategy::BlockWithTimeout(timeout))
+    /// ```
+    ///
+    /// # Arguments
+    ///
+    /// * `timeout` - Maximum time to wait for queue space
+    ///
+    /// # Use Cases
+    ///
+    /// - Web servers with request timeouts
+    /// - Systems that can tolerate brief delays but need bounded latency
+    #[must_use = "builder methods return a new value and do not modify the original"]
+    pub fn block_with_timeout(self, timeout: Duration) -> Self {
+        self.with_backpressure_strategy(BackpressureStrategy::BlockWithTimeout(timeout))
     }
 
     /// Set a custom queue implementation.
@@ -357,7 +430,21 @@ impl ThreadPool {
     }
 
     /// Submit a job to the pool
+    ///
+    /// The submission behavior depends on the configured [`BackpressureStrategy`]:
+    ///
+    /// - [`Block`](BackpressureStrategy::Block): Wait indefinitely for queue space (default)
+    /// - [`BlockWithTimeout`](BackpressureStrategy::BlockWithTimeout): Wait up to the timeout
+    /// - [`RejectImmediately`](BackpressureStrategy::RejectImmediately): Return error if queue is full
+    /// - [`DropOldest`](BackpressureStrategy::DropOldest): Not supported by standard queue, falls back to block
+    /// - [`DropNewest`](BackpressureStrategy::DropNewest): Silently drop if queue is full
+    /// - [`Custom`](BackpressureStrategy::Custom): Delegate to custom handler
     pub fn submit<J: Job + 'static>(&self, job: J) -> Result<()> {
+        self.submit_with_backpressure(Box::new(job))
+    }
+
+    /// Internal method to submit a boxed job with backpressure handling
+    fn submit_with_backpressure(&self, job: crate::core::BoxedJob) -> Result<()> {
         if !self.running.load(Ordering::Acquire) {
             return Err(ThreadError::not_running(&self.config.thread_name_prefix));
         }
@@ -367,14 +454,100 @@ impl ThreadPool {
             .as_ref()
             .ok_or_else(|| ThreadError::not_running(&self.config.thread_name_prefix))?;
 
-        queue.send(Box::new(job)).map_err(|e| match e {
-            QueueError::Closed(_) => ThreadError::shutting_down(0),
-            QueueError::Full(_) => ThreadError::queue_full(queue.len(), self.config.max_queue_size),
-            _ => ThreadError::QueueSendError,
-        })?;
+        let result = match &self.config.backpressure_strategy {
+            BackpressureStrategy::Block => queue.send(job).map_err(|e| match e {
+                QueueError::Closed(_) => ThreadError::shutting_down(0),
+                QueueError::Full(_) => {
+                    ThreadError::queue_full(queue.len(), self.config.max_queue_size)
+                }
+                _ => ThreadError::QueueSendError,
+            }),
 
-        self.total_jobs_submitted.fetch_add(1, Ordering::Relaxed);
-        Ok(())
+            BackpressureStrategy::BlockWithTimeout(timeout) => {
+                queue.send_timeout(job, *timeout).map_err(|e| match e {
+                    QueueError::Timeout(_) => {
+                        ThreadError::submission_timeout(timeout.as_millis() as u64)
+                    }
+                    QueueError::Closed(_) => ThreadError::shutting_down(0),
+                    QueueError::Full(_) => {
+                        ThreadError::queue_full(queue.len(), self.config.max_queue_size)
+                    }
+                    _ => ThreadError::QueueSendError,
+                })
+            }
+
+            BackpressureStrategy::RejectImmediately => queue.try_send(job).map_err(|e| match e {
+                QueueError::Full(_) => {
+                    ThreadError::queue_full(queue.len(), self.config.max_queue_size)
+                }
+                QueueError::Closed(_) => ThreadError::shutting_down(0),
+                _ => ThreadError::QueueSendError,
+            }),
+
+            BackpressureStrategy::DropOldest => {
+                // DropOldest requires special queue support (deque-based)
+                // For now, fall back to Block behavior
+                // TODO: Implement DroppableQueue for full DropOldest support
+                queue.send(job).map_err(|e| match e {
+                    QueueError::Closed(_) => ThreadError::shutting_down(0),
+                    QueueError::Full(_) => {
+                        ThreadError::queue_full(queue.len(), self.config.max_queue_size)
+                    }
+                    _ => ThreadError::QueueSendError,
+                })
+            }
+
+            BackpressureStrategy::DropNewest => {
+                // Try to send, silently drop if queue is full
+                match queue.try_send(job) {
+                    Ok(()) => Ok(()),
+                    Err(QueueError::Full(_)) => {
+                        // Silently drop the job
+                        Ok(())
+                    }
+                    Err(QueueError::Closed(_)) => Err(ThreadError::shutting_down(0)),
+                    Err(_) => Err(ThreadError::QueueSendError),
+                }
+            }
+
+            BackpressureStrategy::Custom(handler) => {
+                // First try to send normally
+                match queue.try_send(job) {
+                    Ok(()) => Ok(()),
+                    Err(QueueError::Full(holder)) => {
+                        // Get the job back from the holder
+                        if let Some(job) = holder.take() {
+                            // Call the custom handler
+                            match handler.handle_backpressure(job) {
+                                Ok(Some(retry_job)) => {
+                                    // Handler wants to retry with (possibly modified) job
+                                    // Use blocking send for retry
+                                    queue.send(retry_job).map_err(|e| match e {
+                                        QueueError::Closed(_) => ThreadError::shutting_down(0),
+                                        _ => ThreadError::QueueSendError,
+                                    })
+                                }
+                                Ok(None) => {
+                                    // Handler chose to drop the job
+                                    Ok(())
+                                }
+                                Err(e) => Err(e),
+                            }
+                        } else {
+                            // Job holder was empty (shouldn't happen in normal operation)
+                            Err(ThreadError::QueueSendError)
+                        }
+                    }
+                    Err(QueueError::Closed(_)) => Err(ThreadError::shutting_down(0)),
+                    Err(_) => Err(ThreadError::QueueSendError),
+                }
+            }
+        };
+
+        if result.is_ok() {
+            self.total_jobs_submitted.fetch_add(1, Ordering::Relaxed);
+        }
+        result
     }
 
     /// Submit a job with a specific priority.
