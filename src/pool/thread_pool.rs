@@ -1,15 +1,15 @@
 //! Thread pool implementation
 
-use crate::core::{BoxedJob, CancellationToken, ClosureJob, Job, JobHandle, Result, ThreadError};
+use crate::core::{CancellationToken, ClosureJob, Job, JobHandle, Result, ThreadError};
 use crate::pool::worker::{Worker, WorkerStats};
-use crossbeam::channel::{bounded, unbounded, SendTimeoutError, Sender, TrySendError};
+use crate::queue::{BoundedQueue, ChannelQueue, JobQueue, QueueError};
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 /// Configuration for thread pool
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ThreadPoolConfig {
     /// Number of worker threads (0 = number of CPUs)
     pub num_threads: usize,
@@ -23,6 +23,20 @@ pub struct ThreadPoolConfig {
     /// Shorter intervals improve responsiveness but increase CPU usage.
     /// Longer intervals reduce CPU usage but increase shutdown latency.
     pub poll_interval: Duration,
+    /// Custom queue implementation (if None, uses default based on max_queue_size)
+    queue: Option<Arc<dyn JobQueue>>,
+}
+
+impl std::fmt::Debug for ThreadPoolConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ThreadPoolConfig")
+            .field("num_threads", &self.num_threads)
+            .field("max_queue_size", &self.max_queue_size)
+            .field("thread_name_prefix", &self.thread_name_prefix)
+            .field("poll_interval", &self.poll_interval)
+            .field("queue", &self.queue.as_ref().map(|_| "<custom queue>"))
+            .finish()
+    }
 }
 
 impl Default for ThreadPoolConfig {
@@ -34,6 +48,7 @@ impl Default for ThreadPoolConfig {
             max_queue_size: 10_000,
             thread_name_prefix: "worker".to_string(),
             poll_interval: Duration::from_millis(100),
+            queue: None,
         }
     }
 }
@@ -86,6 +101,28 @@ impl ThreadPoolConfig {
     pub fn with_poll_interval(mut self, interval: Duration) -> Self {
         assert!(!interval.is_zero(), "poll interval must be non-zero");
         self.poll_interval = interval;
+        self
+    }
+
+    /// Set a custom queue implementation.
+    ///
+    /// When a custom queue is provided, `max_queue_size` is ignored as the
+    /// queue's behavior is determined by its implementation.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use rust_thread_system::prelude::*;
+    /// use std::sync::Arc;
+    ///
+    /// // Use a priority queue
+    /// let queue = Arc::new(PriorityJobQueue::new());
+    /// let config = ThreadPoolConfig::new(4).with_queue(queue);
+    /// let pool = ThreadPool::with_config(config)?;
+    /// ```
+    #[must_use = "builder methods return a new value and do not modify the original"]
+    pub fn with_queue(mut self, queue: Arc<dyn JobQueue>) -> Self {
+        self.queue = Some(queue);
         self
     }
 
@@ -159,17 +196,29 @@ where
 ///
 /// # Shutdown Mechanism
 ///
-/// The pool uses channel disconnection (dropping the sender) to signal workers
-/// to shutdown, NOT an atomic shutdown flag. This ensures all queued jobs are
-/// processed before shutdown completes.
-#[derive(Debug)]
+/// The pool uses queue closing to signal workers to shutdown.
+/// This ensures all queued jobs are processed before shutdown completes.
+///
+/// # Custom Queues
+///
+/// You can provide a custom queue implementation via `ThreadPoolConfig::with_queue()`.
+/// This enables priority scheduling, custom backpressure, or other queue behaviors.
 pub struct ThreadPool {
     config: ThreadPoolConfig,
     workers: RwLock<Vec<Worker>>,
-    sender: Arc<parking_lot::RwLock<Option<Sender<BoxedJob>>>>,
+    queue: RwLock<Option<Arc<dyn JobQueue>>>,
     running: Arc<AtomicBool>,
     total_jobs_submitted: AtomicU64,
-    queue_size: Arc<AtomicU64>,
+}
+
+impl std::fmt::Debug for ThreadPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ThreadPool")
+            .field("config", &self.config)
+            .field("running", &self.running.load(Ordering::Relaxed))
+            .field("total_jobs_submitted", &self.total_jobs_submitted.load(Ordering::Relaxed))
+            .finish()
+    }
 }
 
 impl ThreadPool {
@@ -187,15 +236,12 @@ impl ThreadPool {
     pub fn with_config(config: ThreadPoolConfig) -> Result<Self> {
         config.validate()?;
 
-        let queue_size = Arc::new(AtomicU64::new(0));
-
         Ok(Self {
             config,
             workers: RwLock::new(Vec::new()),
-            sender: Arc::new(parking_lot::RwLock::new(None)),
+            queue: RwLock::new(None),
             running: Arc::new(AtomicBool::new(false)),
             total_jobs_submitted: AtomicU64::new(0),
-            queue_size,
         })
     }
 
@@ -204,7 +250,7 @@ impl ThreadPool {
     /// # Restart Support
     ///
     /// The pool can be restarted after shutdown by calling start() again.
-    /// Workers will be recreated with a new channel.
+    /// Workers will be recreated with a new queue.
     ///
     /// # Thread Safety
     ///
@@ -213,8 +259,6 @@ impl ThreadPool {
     /// others will receive an `AlreadyRunning` error.
     pub fn start(&self) -> Result<()> {
         // Atomically check and set running flag to prevent race condition
-        // Multiple threads calling start() simultaneously will now be serialized
-        // Only the first thread will succeed, others will get AlreadyRunning error
         if self
             .running
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -226,11 +270,16 @@ impl ThreadPool {
             ));
         }
 
-        // Create channel based on configuration
-        let (sender, receiver) = if self.config.max_queue_size > 0 {
-            bounded(self.config.max_queue_size)
-        } else {
-            unbounded()
+        // Create or use provided queue
+        let queue: Arc<dyn JobQueue> = match &self.config.queue {
+            Some(q) => Arc::clone(q),
+            None => {
+                if self.config.max_queue_size > 0 {
+                    Arc::new(BoundedQueue::new(self.config.max_queue_size))
+                } else {
+                    Arc::new(ChannelQueue::unbounded())
+                }
+            }
         };
 
         // Create workers
@@ -238,62 +287,38 @@ impl ThreadPool {
         for id in 0..self.config.num_threads {
             let worker = Worker::new(
                 id,
-                receiver.clone(),
-                Arc::clone(&self.queue_size),
+                Arc::clone(&queue),
                 self.config.poll_interval,
             )?;
             workers.push(worker);
         }
 
         *self.workers.write() = workers;
-        *self.sender.write() = Some(sender);
-
-        // Running flag is already set by compare_exchange above
+        *self.queue.write() = Some(queue);
 
         Ok(())
     }
 
     /// Submit a job to the pool
     pub fn submit<J: Job + 'static>(&self, job: J) -> Result<()> {
-        // Check if pool is running - this is the primary gate for job submission
         if !self.running.load(Ordering::Acquire) {
             return Err(ThreadError::not_running(&self.config.thread_name_prefix));
         }
 
-        // Atomically get sender reference - no TOCTOU race condition
-        // Even if shutdown() is called between the running check and here,
-        // we either get a valid sender or None - both are handled correctly
-        let sender_guard = self.sender.read();
-        let sender = sender_guard
+        let queue_guard = self.queue.read();
+        let queue = queue_guard
             .as_ref()
             .ok_or_else(|| ThreadError::not_running(&self.config.thread_name_prefix))?;
 
-        // Check for queue size overflow before incrementing
-        // Extremely unlikely (would require 2^64 jobs submitted without processing)
-        // but we protect against it to prevent silent wraparound
-        let current_queue_size = self.queue_size.load(Ordering::Relaxed);
-        if current_queue_size == u64::MAX {
-            return Err(ThreadError::other(
-                "Queue size counter overflow - this should never happen in practice",
-            ));
-        }
-
-        // Increment queue size before sending
-        self.queue_size.fetch_add(1, Ordering::Relaxed);
-
-        // Send the job - sender is valid for duration of this scope
-        let result = sender
-            .send(Box::new(job))
-            .map_err(|_| ThreadError::shutting_down(0));
-
-        if result.is_err() {
-            // Failed to send, decrement queue size
-            self.queue_size.fetch_sub(1, Ordering::Relaxed);
-            return result;
-        }
+        queue.send(Box::new(job)).map_err(|e| match e {
+            QueueError::Closed(_) => ThreadError::shutting_down(0),
+            QueueError::Full(_) => {
+                ThreadError::queue_full(queue.len(), self.config.max_queue_size)
+            }
+            _ => ThreadError::QueueSendError,
+        })?;
 
         self.total_jobs_submitted.fetch_add(1, Ordering::Relaxed);
-
         Ok(())
     }
 
@@ -346,7 +371,6 @@ impl ThreadPool {
         let token = handle.token().clone();
         let job_id = handle.job_id();
 
-        // Create a wrapper job that checks cancellation before execution
         let job = CancellableJob::new(job_id, token.clone(), f);
 
         self.submit(job)?;
@@ -392,39 +416,21 @@ impl ThreadPool {
             return Err(ThreadError::not_running(&self.config.thread_name_prefix));
         }
 
-        let sender_guard = self.sender.read();
-        let sender = sender_guard
+        let queue_guard = self.queue.read();
+        let queue = queue_guard
             .as_ref()
             .ok_or_else(|| ThreadError::not_running(&self.config.thread_name_prefix))?;
 
-        let current_queue_size = self.queue_size.load(Ordering::Relaxed);
-        if current_queue_size == u64::MAX {
-            return Err(ThreadError::other(
-                "Queue size counter overflow - this should never happen in practice",
-            ));
-        }
-
-        self.queue_size.fetch_add(1, Ordering::Relaxed);
-
-        let result = sender.try_send(Box::new(job));
-
-        match result {
-            Ok(()) => {
-                self.total_jobs_submitted.fetch_add(1, Ordering::Relaxed);
-                Ok(())
+        queue.try_send(Box::new(job)).map_err(|e| match e {
+            QueueError::Closed(_) => ThreadError::shutting_down(0),
+            QueueError::Full(_) => {
+                ThreadError::queue_full(queue.len(), self.config.max_queue_size)
             }
-            Err(TrySendError::Full(_)) => {
-                self.queue_size.fetch_sub(1, Ordering::Relaxed);
-                Err(ThreadError::queue_full(
-                    self.queue_size.load(Ordering::Relaxed) as usize,
-                    self.config.max_queue_size,
-                ))
-            }
-            Err(TrySendError::Disconnected(_)) => {
-                self.queue_size.fetch_sub(1, Ordering::Relaxed);
-                Err(ThreadError::shutting_down(0))
-            }
-        }
+            _ => ThreadError::QueueSendError,
+        })?;
+
+        self.total_jobs_submitted.fetch_add(1, Ordering::Relaxed);
+        Ok(())
     }
 
     /// Attempts to execute a closure without blocking.
@@ -483,36 +489,22 @@ impl ThreadPool {
             return Err(ThreadError::not_running(&self.config.thread_name_prefix));
         }
 
-        let sender_guard = self.sender.read();
-        let sender = sender_guard
+        let queue_guard = self.queue.read();
+        let queue = queue_guard
             .as_ref()
             .ok_or_else(|| ThreadError::not_running(&self.config.thread_name_prefix))?;
 
-        let current_queue_size = self.queue_size.load(Ordering::Relaxed);
-        if current_queue_size == u64::MAX {
-            return Err(ThreadError::other(
-                "Queue size counter overflow - this should never happen in practice",
-            ));
-        }
-
-        self.queue_size.fetch_add(1, Ordering::Relaxed);
-
-        let result = sender.send_timeout(Box::new(job), timeout);
-
-        match result {
-            Ok(()) => {
-                self.total_jobs_submitted.fetch_add(1, Ordering::Relaxed);
-                Ok(())
+        queue.send_timeout(Box::new(job), timeout).map_err(|e| match e {
+            QueueError::Closed(_) => ThreadError::shutting_down(0),
+            QueueError::Timeout(_) => ThreadError::submission_timeout(timeout.as_millis() as u64),
+            QueueError::Full(_) => {
+                ThreadError::queue_full(queue.len(), self.config.max_queue_size)
             }
-            Err(SendTimeoutError::Timeout(_)) => {
-                self.queue_size.fetch_sub(1, Ordering::Relaxed);
-                Err(ThreadError::submission_timeout(timeout.as_millis() as u64))
-            }
-            Err(SendTimeoutError::Disconnected(_)) => {
-                self.queue_size.fetch_sub(1, Ordering::Relaxed);
-                Err(ThreadError::shutting_down(0))
-            }
-        }
+            _ => ThreadError::QueueSendError,
+        })?;
+
+        self.total_jobs_submitted.fetch_add(1, Ordering::Relaxed);
+        Ok(())
     }
 
     /// Executes a closure with a timeout.
@@ -552,7 +544,11 @@ impl ThreadPool {
     /// This represents the number of jobs waiting to be processed.
     /// The value is approximate as it may change between checking and using it.
     pub fn queue_size(&self) -> u64 {
-        self.queue_size.load(Ordering::Relaxed)
+        self.queue
+            .read()
+            .as_ref()
+            .map(|q| q.len() as u64)
+            .unwrap_or(0)
     }
 
     /// Get statistics for all workers
@@ -562,21 +558,18 @@ impl ThreadPool {
 
     /// Get total jobs processed across all workers
     pub fn total_jobs_processed(&self) -> u64 {
-        // Optimized: acquire lock once and iterate directly
         let workers = self.workers.read();
         workers.iter().map(|w| w.stats().get_jobs_processed()).sum()
     }
 
     /// Get total jobs failed across all workers
     pub fn total_jobs_failed(&self) -> u64 {
-        // Optimized: acquire lock once and iterate directly
         let workers = self.workers.read();
         workers.iter().map(|w| w.stats().get_jobs_failed()).sum()
     }
 
     /// Get total jobs panicked across all workers
     pub fn total_jobs_panicked(&self) -> u64 {
-        // Optimized: acquire lock once and iterate directly
         let workers = self.workers.read();
         workers.iter().map(|w| w.stats().get_jobs_panicked()).sum()
     }
@@ -586,7 +579,7 @@ impl ThreadPool {
     /// # Graceful Shutdown
     ///
     /// 1. Stops accepting new jobs (sets running = false)
-    /// 2. Closes the channel (drops sender)
+    /// 2. Closes the queue
     /// 3. Waits for all workers to drain queued jobs and exit
     ///
     /// This ensures all queued jobs are processed before shutdown completes.
@@ -604,16 +597,19 @@ impl ThreadPool {
         // Mark as not running first to prevent new job submissions
         self.running.store(false, Ordering::Release);
 
-        // Drop sender to close the channel
-        // Thread-safe: acquires write lock, preventing concurrent submit() from using stale sender
-        *self.sender.write() = None;
+        // Close the queue to signal workers to shutdown
+        if let Some(queue) = self.queue.read().as_ref() {
+            queue.close();
+        }
 
         // Wait for all workers to finish draining the queue
-        // Workers will exit when they receive RecvTimeoutError::Disconnected
         let workers = std::mem::take(&mut *self.workers.write());
         for worker in workers {
             worker.join()?;
         }
+
+        // Clear the queue reference
+        *self.queue.write() = None;
 
         Ok(())
     }
@@ -791,7 +787,6 @@ mod tests {
         assert_eq!(counter.load(Ordering::Relaxed), 1000);
         assert_eq!(pool.total_jobs_submitted(), 1000);
 
-        // Now we can call shutdown on Arc<ThreadPool> thanks to interior mutability
         pool.shutdown().expect("Failed to shutdown pool");
     }
 
@@ -879,7 +874,6 @@ mod tests {
     #[test]
     fn test_try_execute_returns_immediately_when_queue_full() {
         // Use a very small queue to easily fill it
-        // 1 worker + queue size 2 = max 3 jobs can be "in flight"
         let config = ThreadPoolConfig::new(1).with_max_queue_size(2);
         let pool = ThreadPool::with_config(config).expect("Failed to create thread pool");
         pool.start().expect("Failed to start pool");
@@ -1113,11 +1107,34 @@ mod tests {
         let elapsed = start.elapsed();
 
         // With 10ms poll interval, shutdown should complete quickly
-        // (within a few poll cycles)
         assert!(
             elapsed < Duration::from_millis(100),
             "Shutdown took too long: {:?}",
             elapsed
         );
+    }
+
+    #[test]
+    fn test_custom_queue() {
+        // Test using a custom queue via config
+        let custom_queue = Arc::new(ChannelQueue::unbounded());
+        let config = ThreadPoolConfig::new(2).with_queue(Arc::clone(&custom_queue) as Arc<dyn JobQueue>);
+
+        let pool = ThreadPool::with_config(config).expect("Failed to create thread pool");
+        pool.start().expect("Failed to start pool");
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = Arc::clone(&counter);
+
+        pool.execute(move || {
+            counter_clone.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        })
+        .expect("Failed to submit job");
+
+        thread::sleep(Duration::from_millis(100));
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
+
+        pool.shutdown().expect("Failed to shutdown pool");
     }
 }
