@@ -20,6 +20,7 @@ crossbeam = "0.8"
 parking_lot = "0.12"
 thiserror = "2.0"
 num_cpus = "1.16"
+bitflags = "2.6"
 
 [dev-dependencies]
 criterion = "0.5"

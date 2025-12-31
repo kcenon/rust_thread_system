@@ -348,6 +348,55 @@ Queue selection matrix:
 | `adaptive()` | `AdaptiveQueue` |
 | `with_priority()` | `PriorityJobQueue` |
 
+### Queue Capability Introspection
+
+Query queue capabilities at runtime to adapt behavior or validate requirements:
+
+```rust
+use rust_thread_system::prelude::*;
+
+let pool = ThreadPool::with_threads(4)?;
+pool.start()?;
+
+// Get queue capabilities
+if let Some(caps) = pool.queue_capabilities() {
+    println!("Queue: {}", caps.describe());
+    // Output: "crossbeam::channel::unbounded: [unbounded, lock-free, mpmc]"
+
+    if caps.is_lock_free {
+        println!("Using lock-free queue for optimal performance");
+    }
+}
+
+// Check for specific capabilities
+if pool.supports_capabilities(CapabilityFlags::LOCK_FREE | CapabilityFlags::MPMC) {
+    println!("Queue is suitable for high-contention MPMC scenario");
+}
+
+// Validate queue meets requirements
+let queue = ChannelQueue::unbounded();
+match require_capabilities(&queue, CapabilityFlags::PRIORITY) {
+    Ok(()) => println!("Queue supports priority"),
+    Err(e) => println!("{}", e), // "queue 'crossbeam::channel::unbounded' is missing required capabilities: [priority]"
+}
+```
+
+Available capability flags:
+
+| Flag | Description |
+|------|-------------|
+| `BOUNDED` | Queue has maximum capacity |
+| `UNBOUNDED` | Queue has no capacity limit |
+| `LOCK_FREE` | Uses lock-free algorithms |
+| `WAIT_FREE` | Stronger guarantee than lock-free |
+| `PRIORITY` | Supports priority ordering |
+| `EXACT_SIZE` | `len()` returns exact count |
+| `MPMC` | Multi-producer multi-consumer |
+| `SPSC` | Single-producer single-consumer |
+| `BLOCKING` | Supports blocking operations |
+| `TIMEOUT` | Supports timeout operations |
+| `ADAPTIVE` | Uses adaptive strategies |
+
 ### Adaptive Queue
 
 For workloads with variable contention patterns, use `AdaptiveQueue` which automatically

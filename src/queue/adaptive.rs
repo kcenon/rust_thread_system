@@ -620,8 +620,15 @@ impl JobQueue for AdaptiveQueue {
             is_bounded: false,
             capacity: None,
             is_lock_free: self.current_strategy() == QueueStrategy::LockFree,
+            is_wait_free: false,
             supports_priority: false,
             exact_size: false,
+            mpmc: true,
+            spsc: false,
+            supports_blocking: true,
+            supports_timeout: true,
+            is_adaptive: true,
+            implementation_name: "AdaptiveQueue",
         }
     }
 }
@@ -761,7 +768,15 @@ mod tests {
         let caps = queue.capabilities();
         assert!(!caps.is_bounded);
         assert!(caps.capacity.is_none());
+        assert!(!caps.is_wait_free);
         assert!(!caps.supports_priority);
+        assert!(!caps.exact_size);
+        assert!(caps.mpmc);
+        assert!(!caps.spsc);
+        assert!(caps.supports_blocking);
+        assert!(caps.supports_timeout);
+        assert!(caps.is_adaptive);
+        assert_eq!(caps.implementation_name, "AdaptiveQueue");
     }
 
     #[test]

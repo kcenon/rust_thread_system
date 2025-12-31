@@ -200,13 +200,7 @@ impl JobQueue for PriorityJobQueue {
     }
 
     fn capabilities(&self) -> QueueCapabilities {
-        QueueCapabilities {
-            is_bounded: false,
-            capacity: None,
-            is_lock_free: false,
-            supports_priority: true,
-            exact_size: true,
-        }
+        QueueCapabilities::priority_queue(None)
     }
 
     fn send_with_priority(&self, job: BoxedJob, priority: Priority) -> QueueResult<()> {
@@ -353,8 +347,15 @@ mod tests {
         assert!(!caps.is_bounded);
         assert!(caps.capacity.is_none());
         assert!(!caps.is_lock_free);
+        assert!(!caps.is_wait_free);
         assert!(caps.supports_priority);
         assert!(caps.exact_size);
+        assert!(caps.mpmc);
+        assert!(!caps.spsc);
+        assert!(caps.supports_blocking);
+        assert!(caps.supports_timeout);
+        assert!(!caps.is_adaptive);
+        assert_eq!(caps.implementation_name, "PriorityJobQueue");
     }
 
     #[test]

@@ -118,13 +118,7 @@ impl JobQueue for ChannelQueue {
     }
 
     fn capabilities(&self) -> QueueCapabilities {
-        QueueCapabilities {
-            is_bounded: false,
-            capacity: None,
-            is_lock_free: true,
-            supports_priority: false,
-            exact_size: false,
-        }
+        QueueCapabilities::unbounded_channel()
     }
 }
 
@@ -226,8 +220,15 @@ mod tests {
         assert!(!caps.is_bounded);
         assert!(caps.capacity.is_none());
         assert!(caps.is_lock_free);
+        assert!(!caps.is_wait_free);
         assert!(!caps.supports_priority);
         assert!(!caps.exact_size);
+        assert!(caps.mpmc);
+        assert!(!caps.spsc);
+        assert!(caps.supports_blocking);
+        assert!(caps.supports_timeout);
+        assert!(!caps.is_adaptive);
+        assert_eq!(caps.implementation_name, "crossbeam::channel::unbounded");
     }
 
     #[test]
