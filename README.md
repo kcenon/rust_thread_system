@@ -15,6 +15,8 @@ A production-ready, high-performance Rust threading framework with worker pools 
 
 - **Thread Pool Management**: Efficient worker pool with configurable thread count
 - **Flexible Job Queues**: Support for both bounded and unbounded job queues
+- **Pluggable Queue Implementations**: Custom queues via `JobQueue` trait
+- **Priority Scheduling**: Optional priority-based job execution (feature-gated)
 - **Worker Statistics**: Comprehensive metrics tracking per worker and pool-wide
 - **High Performance**: Built on crossbeam channels and parking_lot for optimal performance
 - **Thread Safety**: Lock-free where possible, with minimal synchronization overhead
@@ -63,6 +65,7 @@ fn main() -> Result<()> {
 - **ThreadPool**: Manages worker threads and job distribution
 - **Worker**: Individual worker threads that process jobs
 - **WorkerStats**: Per-worker statistics and metrics
+- **JobQueue Trait**: Abstraction for pluggable queue implementations
 
 ### Design Principles
 
@@ -193,6 +196,38 @@ match pool.execute_timeout(|| {
 
 pool.shutdown()?;
 ```
+
+### Custom Queue Implementation
+
+Use the `JobQueue` trait to implement custom queue behavior:
+
+```rust
+use rust_thread_system::prelude::*;
+use std::sync::Arc;
+
+// Use the built-in priority queue (requires `priority-scheduling` feature)
+#[cfg(feature = "priority-scheduling")]
+{
+    let queue = Arc::new(PriorityJobQueue::new());
+    let config = ThreadPoolConfig::new(4).with_queue(queue);
+    let pool = ThreadPool::with_config(config)?;
+    pool.start()?;
+}
+
+// Or use ChannelQueue/BoundedQueue directly
+let queue: Arc<dyn JobQueue> = Arc::new(ChannelQueue::unbounded());
+let config = ThreadPoolConfig::new(4).with_queue(queue);
+let pool = ThreadPool::with_config(config)?;
+pool.start()?;
+```
+
+Available queue implementations:
+
+| Queue Type | Description | Use Case |
+|------------|-------------|----------|
+| `ChannelQueue` | Unbounded FIFO queue | Default, high throughput |
+| `BoundedQueue` | Bounded FIFO with capacity limit | Memory-constrained environments |
+| `PriorityJobQueue` | Priority-based ordering | Task prioritization (feature-gated) |
 
 ### Worker Statistics
 
