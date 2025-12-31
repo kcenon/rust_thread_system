@@ -35,9 +35,9 @@ pub use channel::ChannelQueue;
 #[cfg(feature = "priority-scheduling")]
 pub use priority::PriorityJobQueue;
 
+use crate::core::BoxedJob;
 #[cfg(feature = "priority-scheduling")]
 use crate::core::Priority;
-use crate::core::BoxedJob;
 use std::time::Duration;
 
 /// Capabilities of a queue implementation for runtime introspection.
@@ -305,11 +305,23 @@ mod tests {
     #[test]
     fn test_queue_error_display() {
         let holder = BoxedJobHolder { job: None };
-        assert_eq!(QueueError::Full(holder.clone()).to_string(), "queue is full");
-        assert_eq!(QueueError::Closed(holder.clone()).to_string(), "queue is closed");
+        assert_eq!(
+            QueueError::Full(holder.clone()).to_string(),
+            "queue is full"
+        );
+        assert_eq!(
+            QueueError::Closed(holder.clone()).to_string(),
+            "queue is closed"
+        );
         assert_eq!(QueueError::Empty.to_string(), "queue is empty");
-        assert_eq!(QueueError::Disconnected.to_string(), "queue is disconnected");
-        assert_eq!(QueueError::Timeout(holder).to_string(), "operation timed out");
+        assert_eq!(
+            QueueError::Disconnected.to_string(),
+            "queue is disconnected"
+        );
+        assert_eq!(
+            QueueError::Timeout(holder).to_string(),
+            "operation timed out"
+        );
     }
 
     #[test]

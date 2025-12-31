@@ -398,10 +398,7 @@ mod tests {
 
         // Send multiple jobs with same priority
         for i in 0..5 {
-            let job = Box::new(ClosureJob::with_name(
-                || Ok(()),
-                format!("Job{}", i),
-            ));
+            let job = Box::new(ClosureJob::with_name(|| Ok(()), format!("Job{}", i)));
             queue.send_with_priority(job, Priority::Normal).unwrap();
         }
 

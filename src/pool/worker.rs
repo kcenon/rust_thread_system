@@ -96,11 +96,7 @@ impl Worker {
     ///
     /// Workers exit when the queue is closed and empty,
     /// ensuring all queued jobs are processed before shutdown completes.
-    pub fn new(
-        id: usize,
-        queue: Arc<dyn JobQueue>,
-        poll_interval: Duration,
-    ) -> Result<Self> {
+    pub fn new(id: usize, queue: Arc<dyn JobQueue>, poll_interval: Duration) -> Result<Self> {
         let stats = Arc::new(WorkerStats::new());
         let stats_clone = Arc::clone(&stats);
 
@@ -142,12 +138,7 @@ impl Worker {
     ///
     /// Workers process jobs from the queue until it is closed and empty.
     /// This ensures all queued jobs are processed before shutdown.
-    fn run(
-        id: usize,
-        queue: Arc<dyn JobQueue>,
-        stats: Arc<WorkerStats>,
-        poll_interval: Duration,
-    ) {
+    fn run(id: usize, queue: Arc<dyn JobQueue>, stats: Arc<WorkerStats>, poll_interval: Duration) {
         loop {
             match queue.recv_timeout(poll_interval) {
                 Ok(mut job) => {
@@ -280,8 +271,8 @@ mod tests {
         let queue: Arc<dyn JobQueue> = Arc::new(ChannelQueue::unbounded());
         let poll_interval = Duration::from_millis(100);
 
-        let worker = Worker::new(0, Arc::clone(&queue), poll_interval)
-            .expect("Failed to create worker");
+        let worker =
+            Worker::new(0, Arc::clone(&queue), poll_interval).expect("Failed to create worker");
         let stats = worker.stats();
 
         // Send a job
@@ -305,8 +296,8 @@ mod tests {
         let queue: Arc<dyn JobQueue> = Arc::new(ChannelQueue::unbounded());
         let poll_interval = Duration::from_millis(100);
 
-        let worker = Worker::new(0, Arc::clone(&queue), poll_interval)
-            .expect("Failed to create worker");
+        let worker =
+            Worker::new(0, Arc::clone(&queue), poll_interval).expect("Failed to create worker");
         let stats = worker.stats();
 
         // Send a job that panics
