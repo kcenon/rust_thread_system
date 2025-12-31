@@ -86,14 +86,24 @@ pool.shutdown()?;
 
 ```rust
 use rust_thread_system::prelude::*;
+use std::time::Duration;
 
 let config = ThreadPoolConfig::new(8)
     .with_max_queue_size(1000)
-    .with_thread_name_prefix("my-worker");
+    .with_thread_name_prefix("my-worker")
+    .with_poll_interval(Duration::from_millis(50));  // 더 빠른 응답성
 
 let mut pool = ThreadPool::with_config(config)?;
 pool.start()?;
 ```
+
+#### Poll Interval 튜닝
+
+`poll_interval`은 워커가 새 작업과 종료 신호를 확인하는 빈도를 제어합니다:
+
+- **고처리량 시스템** (10-50ms): 빠른 작업 수신, 높은 CPU 사용량
+- **백그라운드 서비스** (500ms-1s): 낮은 CPU 사용량, 느린 종료
+- **기본값** (100ms): 대부분의 사용 사례에 균형 잡힌 설정
 
 ### 커스텀 Job 타입
 

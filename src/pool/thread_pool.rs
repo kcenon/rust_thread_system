@@ -17,6 +17,12 @@ pub struct ThreadPoolConfig {
     pub max_queue_size: usize,
     /// Thread name prefix
     pub thread_name_prefix: String,
+    /// Worker poll interval for checking new jobs and shutdown state.
+    /// Default: 100ms
+    ///
+    /// Shorter intervals improve responsiveness but increase CPU usage.
+    /// Longer intervals reduce CPU usage but increase shutdown latency.
+    pub poll_interval: Duration,
 }
 
 impl Default for ThreadPoolConfig {
@@ -27,6 +33,7 @@ impl Default for ThreadPoolConfig {
             // Use 0 or with_max_queue_size(0) for unbounded queue
             max_queue_size: 10_000,
             thread_name_prefix: "worker".to_string(),
+            poll_interval: Duration::from_millis(100),
         }
     }
 }
@@ -56,6 +63,29 @@ impl ThreadPoolConfig {
     #[must_use = "builder methods return a new value and do not modify the original"]
     pub fn with_thread_name_prefix<S: Into<String>>(mut self, prefix: S) -> Self {
         self.thread_name_prefix = prefix.into();
+        self
+    }
+
+    /// Set the worker poll interval.
+    ///
+    /// This controls how frequently workers check for new jobs and shutdown signals.
+    ///
+    /// # Arguments
+    ///
+    /// * `interval` - Duration between poll attempts. Must be non-zero.
+    ///
+    /// # Trade-offs
+    ///
+    /// - **Shorter intervals** (10-50ms): Better responsiveness, faster shutdown, higher CPU usage
+    /// - **Longer intervals** (500ms-1s): Lower CPU usage, slower shutdown, reduced responsiveness
+    ///
+    /// # Panics
+    ///
+    /// Panics if interval is zero.
+    #[must_use = "builder methods return a new value and do not modify the original"]
+    pub fn with_poll_interval(mut self, interval: Duration) -> Self {
+        assert!(!interval.is_zero(), "poll interval must be non-zero");
+        self.poll_interval = interval;
         self
     }
 
@@ -200,7 +230,12 @@ impl ThreadPool {
         // Create workers
         let mut workers = Vec::with_capacity(self.config.num_threads);
         for id in 0..self.config.num_threads {
-            let worker = Worker::new(id, receiver.clone(), Arc::clone(&self.queue_size))?;
+            let worker = Worker::new(
+                id,
+                receiver.clone(),
+                Arc::clone(&self.queue_size),
+                self.config.poll_interval,
+            )?;
             workers.push(worker);
         }
 
@@ -1017,5 +1052,60 @@ mod tests {
         assert_eq!(counter.load(Ordering::Relaxed), 50);
 
         pool.shutdown().expect("Failed to shutdown pool");
+    }
+
+    #[test]
+    fn test_poll_interval_configuration() {
+        let config = ThreadPoolConfig::new(2).with_poll_interval(Duration::from_millis(50));
+        assert_eq!(config.poll_interval, Duration::from_millis(50));
+
+        let mut pool = ThreadPool::with_config(config).expect("Failed to create thread pool");
+        pool.start().expect("Failed to start pool");
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = Arc::clone(&counter);
+
+        pool.execute(move || {
+            counter_clone.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        })
+        .expect("Failed to submit job");
+
+        thread::sleep(Duration::from_millis(100));
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
+
+        pool.shutdown().expect("Failed to shutdown pool");
+    }
+
+    #[test]
+    fn test_poll_interval_default() {
+        let config = ThreadPoolConfig::default();
+        assert_eq!(config.poll_interval, Duration::from_millis(100));
+    }
+
+    #[test]
+    #[should_panic(expected = "poll interval must be non-zero")]
+    fn test_poll_interval_zero_panics() {
+        let _ = ThreadPoolConfig::new(2).with_poll_interval(Duration::ZERO);
+    }
+
+    #[test]
+    fn test_short_poll_interval_faster_shutdown() {
+        // Test that shorter poll interval results in faster shutdown detection
+        let config = ThreadPoolConfig::new(1).with_poll_interval(Duration::from_millis(10));
+        let mut pool = ThreadPool::with_config(config).expect("Failed to create thread pool");
+        pool.start().expect("Failed to start pool");
+
+        let start = std::time::Instant::now();
+        pool.shutdown().expect("Failed to shutdown pool");
+        let elapsed = start.elapsed();
+
+        // With 10ms poll interval, shutdown should complete quickly
+        // (within a few poll cycles)
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "Shutdown took too long: {:?}",
+            elapsed
+        );
     }
 }

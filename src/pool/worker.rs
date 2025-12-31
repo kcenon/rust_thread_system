@@ -91,6 +91,7 @@ impl Worker {
     /// * `id` - Unique identifier for this worker
     /// * `receiver` - Channel receiver for receiving jobs
     /// * `queue_size` - Shared counter for tracking queue size
+    /// * `poll_interval` - Duration between poll attempts for new jobs
     ///
     /// # Shutdown Behavior
     ///
@@ -101,6 +102,7 @@ impl Worker {
         id: usize,
         receiver: Receiver<BoxedJob>,
         queue_size: Arc<AtomicU64>,
+        poll_interval: Duration,
     ) -> Result<Self> {
         let stats = Arc::new(WorkerStats::new());
         let stats_clone = Arc::clone(&stats);
@@ -108,7 +110,7 @@ impl Worker {
         let thread = thread::Builder::new()
             .name(format!("worker-{}", id))
             .spawn(move || {
-                Self::run(id, receiver, stats_clone, queue_size);
+                Self::run(id, receiver, stats_clone, queue_size, poll_interval);
             })
             .map_err(|e| ThreadError::spawn(id, e.to_string()))?;
 
@@ -148,12 +150,13 @@ impl Worker {
         receiver: Receiver<BoxedJob>,
         stats: Arc<WorkerStats>,
         queue_size: Arc<AtomicU64>,
+        poll_interval: Duration,
     ) {
         loop {
             // Try to receive a job with timeout
             // Workers exit when channel is disconnected (RecvTimeoutError::Disconnected)
             // This ensures all queued jobs are drained before shutdown completes
-            match receiver.recv_timeout(Duration::from_millis(100)) {
+            match receiver.recv_timeout(poll_interval) {
                 Ok(mut job) => {
                     // Decrement queue size as we're processing this job (with underflow protection)
                     queue_size
@@ -271,8 +274,10 @@ mod tests {
     fn test_worker_creation() {
         let (sender, receiver) = unbounded();
         let queue_size = Arc::new(AtomicU64::new(0));
+        let poll_interval = Duration::from_millis(100);
 
-        let worker = Worker::new(0, receiver, queue_size).expect("Failed to create worker");
+        let worker =
+            Worker::new(0, receiver, queue_size, poll_interval).expect("Failed to create worker");
         assert_eq!(worker.id(), 0);
 
         // Disconnect channel to trigger worker shutdown
@@ -284,9 +289,10 @@ mod tests {
     fn test_worker_job_execution() {
         let (sender, receiver) = unbounded();
         let queue_size = Arc::new(AtomicU64::new(0));
+        let poll_interval = Duration::from_millis(100);
 
-        let worker =
-            Worker::new(0, receiver, Arc::clone(&queue_size)).expect("Failed to create worker");
+        let worker = Worker::new(0, receiver, Arc::clone(&queue_size), poll_interval)
+            .expect("Failed to create worker");
         let stats = worker.stats();
 
         // Send a job
@@ -311,9 +317,10 @@ mod tests {
     fn test_worker_panic_handling() {
         let (sender, receiver) = unbounded();
         let queue_size = Arc::new(AtomicU64::new(0));
+        let poll_interval = Duration::from_millis(100);
 
-        let worker =
-            Worker::new(0, receiver, Arc::clone(&queue_size)).expect("Failed to create worker");
+        let worker = Worker::new(0, receiver, Arc::clone(&queue_size), poll_interval)
+            .expect("Failed to create worker");
         let stats = worker.stats();
 
         // Send a job that panics
