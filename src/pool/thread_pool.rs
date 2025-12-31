@@ -2,10 +2,11 @@
 
 use crate::core::{BoxedJob, CancellationToken, ClosureJob, Job, JobHandle, Result, ThreadError};
 use crate::pool::worker::{Worker, WorkerStats};
-use crossbeam::channel::{bounded, unbounded, Sender};
+use crossbeam::channel::{bounded, unbounded, SendTimeoutError, Sender, TrySendError};
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Configuration for thread pool
 #[derive(Debug, Clone)]
@@ -310,6 +311,184 @@ impl ThreadPool {
         self.submit(job)?;
 
         Ok(handle)
+    }
+
+    /// Attempts to submit a job without blocking.
+    ///
+    /// Returns immediately if the queue is full instead of waiting for space.
+    /// For unbounded queues, this behaves the same as `submit()`.
+    ///
+    /// # Errors
+    ///
+    /// - `ThreadError::NotRunning` - Pool is not running
+    /// - `ThreadError::QueueFull` - Queue is at capacity (bounded queue only)
+    /// - `ThreadError::ShuttingDown` - Pool is shutting down
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use rust_thread_system::prelude::*;
+    ///
+    /// # fn main() -> Result<()> {
+    /// let config = ThreadPoolConfig::new(2).with_max_queue_size(10);
+    /// let mut pool = ThreadPool::with_config(config)?;
+    /// pool.start()?;
+    ///
+    /// match pool.try_execute(|| {
+    ///     println!("Job executed");
+    ///     Ok(())
+    /// }) {
+    ///     Ok(()) => println!("Job submitted"),
+    ///     Err(ThreadError::QueueFull { .. }) => println!("Queue is full, try later"),
+    ///     Err(e) => println!("Error: {}", e),
+    /// }
+    /// # pool.shutdown()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn try_submit<J: Job + 'static>(&self, job: J) -> Result<()> {
+        if !self.running.load(Ordering::Acquire) {
+            return Err(ThreadError::not_running(&self.config.thread_name_prefix));
+        }
+
+        let sender_guard = self.sender.read();
+        let sender = sender_guard
+            .as_ref()
+            .ok_or_else(|| ThreadError::not_running(&self.config.thread_name_prefix))?;
+
+        let current_queue_size = self.queue_size.load(Ordering::Relaxed);
+        if current_queue_size == u64::MAX {
+            return Err(ThreadError::other(
+                "Queue size counter overflow - this should never happen in practice",
+            ));
+        }
+
+        self.queue_size.fetch_add(1, Ordering::Relaxed);
+
+        let result = sender.try_send(Box::new(job));
+
+        match result {
+            Ok(()) => {
+                self.total_jobs_submitted.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(TrySendError::Full(_)) => {
+                self.queue_size.fetch_sub(1, Ordering::Relaxed);
+                Err(ThreadError::queue_full(
+                    self.queue_size.load(Ordering::Relaxed) as usize,
+                    self.config.max_queue_size,
+                ))
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                self.queue_size.fetch_sub(1, Ordering::Relaxed);
+                Err(ThreadError::shutting_down(0))
+            }
+        }
+    }
+
+    /// Attempts to execute a closure without blocking.
+    ///
+    /// Returns immediately if the queue is full instead of waiting for space.
+    /// For unbounded queues, this behaves the same as `execute()`.
+    ///
+    /// # Errors
+    ///
+    /// - `ThreadError::NotRunning` - Pool is not running
+    /// - `ThreadError::QueueFull` - Queue is at capacity (bounded queue only)
+    /// - `ThreadError::ShuttingDown` - Pool is shutting down
+    pub fn try_execute<F>(&self, f: F) -> Result<()>
+    where
+        F: FnOnce() -> Result<()> + Send + 'static,
+    {
+        self.try_submit(ClosureJob::new(f))
+    }
+
+    /// Submits a job with a timeout.
+    ///
+    /// Waits up to the specified duration for space in the queue.
+    /// For unbounded queues, this behaves the same as `submit()`.
+    ///
+    /// # Errors
+    ///
+    /// - `ThreadError::NotRunning` - Pool is not running
+    /// - `ThreadError::SubmissionTimeout` - Timed out waiting for queue space
+    /// - `ThreadError::ShuttingDown` - Pool is shutting down
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use rust_thread_system::prelude::*;
+    /// use std::time::Duration;
+    ///
+    /// # fn main() -> Result<()> {
+    /// let config = ThreadPoolConfig::new(2).with_max_queue_size(10);
+    /// let mut pool = ThreadPool::with_config(config)?;
+    /// pool.start()?;
+    ///
+    /// match pool.execute_timeout(|| {
+    ///     println!("Job executed");
+    ///     Ok(())
+    /// }, Duration::from_millis(100)) {
+    ///     Ok(()) => println!("Job submitted"),
+    ///     Err(ThreadError::SubmissionTimeout { .. }) => println!("Submission timed out"),
+    ///     Err(e) => println!("Error: {}", e),
+    /// }
+    /// # pool.shutdown()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn submit_timeout<J: Job + 'static>(&self, job: J, timeout: Duration) -> Result<()> {
+        if !self.running.load(Ordering::Acquire) {
+            return Err(ThreadError::not_running(&self.config.thread_name_prefix));
+        }
+
+        let sender_guard = self.sender.read();
+        let sender = sender_guard
+            .as_ref()
+            .ok_or_else(|| ThreadError::not_running(&self.config.thread_name_prefix))?;
+
+        let current_queue_size = self.queue_size.load(Ordering::Relaxed);
+        if current_queue_size == u64::MAX {
+            return Err(ThreadError::other(
+                "Queue size counter overflow - this should never happen in practice",
+            ));
+        }
+
+        self.queue_size.fetch_add(1, Ordering::Relaxed);
+
+        let result = sender.send_timeout(Box::new(job), timeout);
+
+        match result {
+            Ok(()) => {
+                self.total_jobs_submitted.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(SendTimeoutError::Timeout(_)) => {
+                self.queue_size.fetch_sub(1, Ordering::Relaxed);
+                Err(ThreadError::submission_timeout(timeout.as_millis() as u64))
+            }
+            Err(SendTimeoutError::Disconnected(_)) => {
+                self.queue_size.fetch_sub(1, Ordering::Relaxed);
+                Err(ThreadError::shutting_down(0))
+            }
+        }
+    }
+
+    /// Executes a closure with a timeout.
+    ///
+    /// Waits up to the specified duration for space in the queue.
+    /// For unbounded queues, this behaves the same as `execute()`.
+    ///
+    /// # Errors
+    ///
+    /// - `ThreadError::NotRunning` - Pool is not running
+    /// - `ThreadError::SubmissionTimeout` - Timed out waiting for queue space
+    /// - `ThreadError::ShuttingDown` - Pool is shutting down
+    pub fn execute_timeout<F>(&self, f: F, timeout: Duration) -> Result<()>
+    where
+        F: FnOnce() -> Result<()> + Send + 'static,
+    {
+        self.submit_timeout(ClosureJob::new(f), timeout)
     }
 
     /// Get the number of worker threads
@@ -646,6 +825,196 @@ mod tests {
         // 5 should have succeeded, 5 failed
         assert_eq!(pool.total_jobs_processed(), 5);
         assert_eq!(pool.total_jobs_failed(), 5);
+
+        pool.shutdown().expect("Failed to shutdown pool");
+    }
+
+    #[test]
+    fn test_try_execute_returns_immediately_when_queue_full() {
+        // Use a very small queue to easily fill it
+        // 1 worker + queue size 2 = max 3 jobs can be "in flight"
+        let config = ThreadPoolConfig::new(1).with_max_queue_size(2);
+        let mut pool = ThreadPool::with_config(config).expect("Failed to create thread pool");
+        pool.start().expect("Failed to start pool");
+
+        // Use a channel to signal when the first job starts executing
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+
+        // Submit a job that blocks the worker
+        pool.execute(move || {
+            started_tx.send(()).unwrap();
+            // Wait until test signals to complete
+            let _ = done_rx.recv();
+            Ok(())
+        })
+        .expect("Failed to submit first job");
+
+        // Wait for the worker to pick up the first job
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("First job should start within 5 seconds");
+
+        // Now the worker is blocked, fill the queue (size 2)
+        pool.try_execute(|| Ok(()))
+            .expect("Failed to submit second job");
+
+        pool.try_execute(|| Ok(()))
+            .expect("Failed to submit third job");
+
+        // Queue is now full, this should fail immediately
+        let result = pool.try_execute(|| Ok(()));
+        assert!(
+            matches!(result, Err(ThreadError::QueueFull { .. })),
+            "Expected QueueFull error, got: {:?}",
+            result
+        );
+
+        // Release the blocking job to allow shutdown
+        let _ = done_tx.send(());
+        pool.shutdown().expect("Failed to shutdown pool");
+    }
+
+    #[test]
+    fn test_try_execute_succeeds_with_unbounded_queue() {
+        let config = ThreadPoolConfig::new(2).with_max_queue_size(0); // unbounded
+        let mut pool = ThreadPool::with_config(config).expect("Failed to create thread pool");
+        pool.start().expect("Failed to start pool");
+
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        // Submit many jobs - should all succeed
+        for _ in 0..100 {
+            let counter_clone = Arc::clone(&counter);
+            pool.try_execute(move || {
+                counter_clone.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            })
+            .expect("try_execute should not fail with unbounded queue");
+        }
+
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(counter.load(Ordering::Relaxed), 100);
+
+        pool.shutdown().expect("Failed to shutdown pool");
+    }
+
+    #[test]
+    fn test_try_execute_when_not_running() {
+        let pool = ThreadPool::new().expect("Failed to create thread pool");
+        let result = pool.try_execute(|| Ok(()));
+        assert!(matches!(result, Err(ThreadError::NotRunning { .. })));
+    }
+
+    #[test]
+    fn test_execute_timeout_succeeds_within_timeout() {
+        let config = ThreadPoolConfig::new(2).with_max_queue_size(10);
+        let mut pool = ThreadPool::with_config(config).expect("Failed to create thread pool");
+        pool.start().expect("Failed to start pool");
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = Arc::clone(&counter);
+
+        let result = pool.execute_timeout(
+            move || {
+                counter_clone.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            },
+            Duration::from_secs(1),
+        );
+
+        assert!(result.is_ok());
+        thread::sleep(Duration::from_millis(100));
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
+
+        pool.shutdown().expect("Failed to shutdown pool");
+    }
+
+    #[test]
+    fn test_execute_timeout_times_out_when_queue_full() {
+        // Use a very small queue to easily fill it
+        let config = ThreadPoolConfig::new(1).with_max_queue_size(1);
+        let mut pool = ThreadPool::with_config(config).expect("Failed to create thread pool");
+        pool.start().expect("Failed to start pool");
+
+        // Use a channel to signal when the first job starts executing
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+
+        // Submit a job that blocks the worker
+        pool.execute(move || {
+            started_tx.send(()).unwrap();
+            // Wait until test signals to complete
+            let _ = done_rx.recv();
+            Ok(())
+        })
+        .expect("Failed to submit blocking job");
+
+        // Wait for the worker to pick up the first job
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("First job should start within 5 seconds");
+
+        // Fill the queue (size 1)
+        pool.execute(|| Ok(())).expect("Failed to fill queue");
+
+        // This should timeout
+        let start = std::time::Instant::now();
+        let result = pool.execute_timeout(|| Ok(()), Duration::from_millis(50));
+        let elapsed = start.elapsed();
+
+        assert!(
+            matches!(result, Err(ThreadError::SubmissionTimeout { .. })),
+            "Expected SubmissionTimeout error, got: {:?}",
+            result
+        );
+        // Verify it actually waited approximately the timeout duration
+        assert!(
+            elapsed >= Duration::from_millis(40),
+            "Should have waited at least 40ms, but only waited {:?}",
+            elapsed
+        );
+        assert!(
+            elapsed < Duration::from_millis(200),
+            "Should not have waited more than 200ms, but waited {:?}",
+            elapsed
+        );
+
+        // Release the blocking job to allow shutdown
+        let _ = done_tx.send(());
+        pool.shutdown().expect("Failed to shutdown pool");
+    }
+
+    #[test]
+    fn test_execute_timeout_when_not_running() {
+        let pool = ThreadPool::new().expect("Failed to create thread pool");
+        let result = pool.execute_timeout(|| Ok(()), Duration::from_millis(100));
+        assert!(matches!(result, Err(ThreadError::NotRunning { .. })));
+    }
+
+    #[test]
+    fn test_submit_timeout_with_unbounded_queue() {
+        let config = ThreadPoolConfig::new(2).with_max_queue_size(0); // unbounded
+        let mut pool = ThreadPool::with_config(config).expect("Failed to create thread pool");
+        pool.start().expect("Failed to start pool");
+
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        // Submit many jobs with timeout - should all succeed immediately
+        for _ in 0..50 {
+            let counter_clone = Arc::clone(&counter);
+            pool.execute_timeout(
+                move || {
+                    counter_clone.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                },
+                Duration::from_millis(10),
+            )
+            .expect("submit_timeout should not fail with unbounded queue");
+        }
+
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(counter.load(Ordering::Relaxed), 50);
 
         pool.shutdown().expect("Failed to shutdown pool");
     }
