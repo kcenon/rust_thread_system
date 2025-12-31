@@ -18,7 +18,7 @@
 //!
 //! # fn main() -> Result<()> {
 //! // Create and start a thread pool
-//! let mut pool = ThreadPool::with_threads(4)?;
+//! let pool = ThreadPool::with_threads(4)?;
 //! pool.start()?;
 //!
 //! // Submit jobs
@@ -45,7 +45,7 @@
 //!     .with_max_queue_size(1000)
 //!     .with_thread_name_prefix("my-worker");
 //!
-//! let mut pool = ThreadPool::with_config(config)?;
+//! let pool = ThreadPool::with_config(config)?;
 //! pool.start()?;
 //! # pool.shutdown()?;
 //! # Ok(())
@@ -73,7 +73,7 @@
 //! }
 //!
 //! # fn main() -> Result<()> {
-//! # let mut pool = ThreadPool::with_threads(2)?;
+//! # let pool = ThreadPool::with_threads(2)?;
 //! # pool.start()?;
 //! pool.submit(MyJob {
 //!     data: "test".to_string(),
@@ -89,7 +89,7 @@
 //! use rust_thread_system::prelude::*;
 //!
 //! # fn main() -> Result<()> {
-//! # let mut pool = ThreadPool::with_threads(2)?;
+//! # let pool = ThreadPool::with_threads(2)?;
 //! # pool.start()?;
 //! # for _ in 0..10 {
 //! #     pool.execute(|| Ok(()))?;

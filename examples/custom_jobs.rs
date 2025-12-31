@@ -87,7 +87,7 @@ fn create_named_job(name: &str, value: i32) -> ClosureJob<impl FnOnce() -> Resul
 fn main() -> Result<()> {
     println!("=== Rust Thread System - Custom Jobs Example ===\n");
 
-    let mut pool = ThreadPool::with_threads(4)?;
+    let pool = ThreadPool::with_threads(4)?;
     pool.start()?;
 
     println!("1. Submitting custom data processing jobs:");

@@ -12,7 +12,7 @@ fn main() -> Result<()> {
     println!("=== Rust Thread System - Basic Usage Example ===\n");
 
     // Create a thread pool with 4 worker threads
-    let mut pool = ThreadPool::with_threads(4)?;
+    let pool = ThreadPool::with_threads(4)?;
 
     println!(
         "1. Starting thread pool with {} threads",

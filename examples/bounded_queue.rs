@@ -18,7 +18,7 @@ fn main() -> Result<()> {
         .with_max_queue_size(5)
         .with_thread_name_prefix("bounded-worker");
 
-    let mut pool = ThreadPool::with_config(config)?;
+    let pool = ThreadPool::with_config(config)?;
 
     println!("1. Configuration:");
     println!("   Worker threads: {}", pool.num_threads());

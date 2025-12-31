@@ -9,7 +9,7 @@ use std::time::Duration;
 #[test]
 fn test_cancel_queued_job() {
     // Test cancelling a job before it starts execution
-    let mut pool = ThreadPool::with_threads(1).expect("Failed to create pool");
+    let pool = ThreadPool::with_threads(1).expect("Failed to create pool");
     pool.start().expect("Failed to start pool");
 
     let executed = Arc::new(AtomicBool::new(false));
@@ -53,7 +53,7 @@ fn test_cancel_queued_job() {
 #[test]
 fn test_cancel_running_job() {
     // Test cancelling a job while it's running
-    let mut pool = ThreadPool::with_threads(2).expect("Failed to create pool");
+    let pool = ThreadPool::with_threads(2).expect("Failed to create pool");
     pool.start().expect("Failed to start pool");
 
     let started = Arc::new(AtomicBool::new(false));
@@ -101,7 +101,7 @@ fn test_cancel_running_job() {
 #[test]
 fn test_multiple_cancellations() {
     // Test cancelling multiple jobs
-    let mut pool = ThreadPool::with_threads(4).expect("Failed to create pool");
+    let pool = ThreadPool::with_threads(4).expect("Failed to create pool");
     pool.start().expect("Failed to start pool");
 
     let mut handles = Vec::new();
@@ -158,7 +158,7 @@ fn test_multiple_cancellations() {
 #[test]
 fn test_cancellation_idempotent() {
     // Test that calling cancel multiple times is safe
-    let mut pool = ThreadPool::with_threads(1).expect("Failed to create pool");
+    let pool = ThreadPool::with_threads(1).expect("Failed to create pool");
     pool.start().expect("Failed to start pool");
 
     let handle = pool
@@ -186,7 +186,7 @@ fn test_cancellation_idempotent() {
 #[test]
 fn test_uncancellable_job_completes() {
     // Test that uncancelled jobs complete normally
-    let mut pool = ThreadPool::with_threads(2).expect("Failed to create pool");
+    let pool = ThreadPool::with_threads(2).expect("Failed to create pool");
     pool.start().expect("Failed to start pool");
 
     let completed = Arc::new(AtomicBool::new(false));
@@ -214,7 +214,7 @@ fn test_uncancellable_job_completes() {
 #[test]
 fn test_job_handle_clone() {
     // Test that JobHandle can be cloned and both clones work
-    let mut pool = ThreadPool::with_threads(1).expect("Failed to create pool");
+    let pool = ThreadPool::with_threads(1).expect("Failed to create pool");
     pool.start().expect("Failed to start pool");
 
     let started = Arc::new(AtomicBool::new(false));
@@ -257,7 +257,7 @@ fn test_job_handle_clone() {
 #[test]
 fn test_cancel_with_long_work() {
     // Test cancelling a job with a longer computation
-    let mut pool = ThreadPool::with_threads(1).expect("Failed to create pool");
+    let pool = ThreadPool::with_threads(1).expect("Failed to create pool");
     pool.start().expect("Failed to start pool");
 
     let work_done = Arc::new(AtomicU64::new(0));
