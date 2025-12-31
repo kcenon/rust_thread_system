@@ -135,9 +135,46 @@ pool.start()?;
 // Jobs will be rejected if queue is full
 match pool.execute(|| Ok(())) {
     Ok(()) => println!("Job accepted"),
-    Err(ThreadError::ShuttingDown) => println!("Queue full or shutting down"),
+    Err(ThreadError::ShuttingDown { .. }) => println!("Queue full or shutting down"),
     Err(e) => println!("Error: {}", e),
 }
+```
+
+### Non-Blocking 작업 제출
+
+```rust
+use rust_thread_system::prelude::*;
+use std::time::Duration;
+
+let config = ThreadPoolConfig::new(4).with_max_queue_size(100);
+let mut pool = ThreadPool::with_config(config)?;
+pool.start()?;
+
+// try_execute는 큐가 가득 차면 즉시 반환
+match pool.try_execute(|| {
+    println!("Job executed");
+    Ok(())
+}) {
+    Ok(()) => println!("Job submitted"),
+    Err(ThreadError::QueueFull { current, max }) => {
+        println!("큐가 가득 찼습니다 ({}/{}), 나중에 다시 시도하세요", current, max);
+    },
+    Err(e) => println!("Error: {}", e),
+}
+
+// execute_timeout은 지정된 시간 동안 큐 공간을 기다림
+match pool.execute_timeout(|| {
+    println!("Job executed");
+    Ok(())
+}, Duration::from_millis(100)) {
+    Ok(()) => println!("Job submitted"),
+    Err(ThreadError::SubmissionTimeout { timeout_ms }) => {
+        println!("제출 시간 초과: {}ms", timeout_ms);
+    },
+    Err(e) => println!("Error: {}", e),
+}
+
+pool.shutdown()?;
 ```
 
 ### 워커 통계
@@ -214,15 +251,20 @@ cargo bench
 
 ```rust
 pub enum ThreadError {
-    AlreadyRunning,
-    NotRunning,
-    ShuttingDown,
-    SpawnError(String),
-    JoinError(String),
-    ExecutionError(String),
-    Cancelled,
-    QueueFull,
-    InvalidConfig(String),
+    AlreadyRunning { pool_name, worker_count },
+    NotRunning { pool_name },
+    ShuttingDown { pending_jobs },
+    SpawnError { thread_id, message, source },
+    JoinError { thread_id, message },
+    ExecutionError { job_id, message },
+    Cancelled { job_id, reason },
+    JobTimeout { job_id, timeout_ms },
+    QueueFull { current, max },
+    QueueSendError,
+    SubmissionTimeout { timeout_ms },
+    InvalidConfig { parameter, message },
+    WorkerPanic { thread_id, message },
+    PoolExhausted { active, total },
     Other(String),
 }
 ```
