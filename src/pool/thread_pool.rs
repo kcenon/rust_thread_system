@@ -1812,8 +1812,8 @@ mod tests {
         }
 
         // Test with_backpressure_strategy
-        let config = ThreadPoolConfig::new(2)
-            .with_backpressure_strategy(BackpressureStrategy::DropNewest);
+        let config =
+            ThreadPoolConfig::new(2).with_backpressure_strategy(BackpressureStrategy::DropNewest);
         assert!(matches!(
             config.backpressure_strategy,
             BackpressureStrategy::DropNewest

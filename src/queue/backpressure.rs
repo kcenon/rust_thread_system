@@ -251,8 +251,14 @@ mod tests {
             format!("{:?}", BackpressureStrategy::RejectImmediately),
             "RejectImmediately"
         );
-        assert_eq!(format!("{:?}", BackpressureStrategy::DropOldest), "DropOldest");
-        assert_eq!(format!("{:?}", BackpressureStrategy::DropNewest), "DropNewest");
+        assert_eq!(
+            format!("{:?}", BackpressureStrategy::DropOldest),
+            "DropOldest"
+        );
+        assert_eq!(
+            format!("{:?}", BackpressureStrategy::DropNewest),
+            "DropNewest"
+        );
     }
 
     #[test]
