@@ -93,14 +93,24 @@ pool.shutdown()?;
 
 ```rust
 use rust_thread_system::prelude::*;
+use std::time::Duration;
 
 let config = ThreadPoolConfig::new(8)
     .with_max_queue_size(1000)
-    .with_thread_name_prefix("my-worker");
+    .with_thread_name_prefix("my-worker")
+    .with_poll_interval(Duration::from_millis(50));  // Faster responsiveness
 
 let mut pool = ThreadPool::with_config(config)?;
 pool.start()?;
 ```
+
+#### Poll Interval Tuning
+
+The `poll_interval` controls how frequently workers check for new jobs and shutdown signals:
+
+- **High-throughput systems** (10-50ms): Faster job pickup, higher CPU usage
+- **Background services** (500ms-1s): Lower CPU usage, slower shutdown
+- **Default** (100ms): Balanced for most use cases
 
 ### Custom Job Types
 
