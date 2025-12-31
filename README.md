@@ -19,6 +19,7 @@ A production-ready, high-performance Rust threading framework with worker pools 
 - **Pluggable Queue Implementations**: Custom queues via `JobQueue` trait
 - **Backpressure Strategies**: Configurable handling for queue-full scenarios (block, timeout, reject, drop)
 - **Priority Scheduling**: Optional priority-based job execution (feature-gated)
+- **Hierarchical Cancellation**: Parent-child token relationships with cascading cancellation, timeout support, and callbacks
 - **Worker Statistics**: Comprehensive metrics tracking per worker and pool-wide
 - **High Performance**: Built on crossbeam channels and parking_lot for optimal performance
 - **Thread Safety**: Lock-free where possible, with minimal synchronization overhead
@@ -455,6 +456,72 @@ impl JobType for GameJobType {
 let config = TypedPoolConfig::<GameJobType>::new()
     .workers_for(GameJobType::Physics, 2)
     .workers_for(GameJobType::Rendering, 4);
+```
+
+### Hierarchical Cancellation Tokens
+
+Create cancellation tokens with parent-child relationships for cascading cancellation:
+
+```rust
+use rust_thread_system::prelude::*;
+use std::time::Duration;
+
+let pool = ThreadPool::with_threads(4)?;
+pool.start()?;
+
+// Create a cancellation scope with timeout
+let scope = pool.cancellation_scope_with_timeout(Duration::from_secs(30));
+
+// Submit multiple jobs sharing the same cancellation scope
+for i in 0..5 {
+    let child = scope.child();
+    pool.execute_with_token(move || {
+        println!("Job {} running", i);
+        Ok(())
+    }, child)?;
+}
+
+// Cancelling the scope cancels all child jobs
+scope.cancel();
+
+pool.shutdown()?;
+```
+
+Register callbacks to run when a token is cancelled:
+
+```rust
+use rust_thread_system::prelude::*;
+
+let token = CancellationToken::new();
+
+// Callback runs when token is cancelled
+token.on_cancel_always(|| {
+    println!("Cleaning up resources...");
+});
+
+// Cancel with a specific reason
+token.cancel_with_reason(CancellationReason::Error("connection lost".to_string()));
+assert!(token.is_cancelled());
+```
+
+Create tokens that auto-cancel after a timeout:
+
+```rust
+use rust_thread_system::prelude::*;
+use std::time::Duration;
+use std::thread;
+
+// Token auto-cancels after 5 seconds
+let token = CancellationToken::with_timeout(Duration::from_secs(5));
+
+// Use in a job
+pool.submit_cancellable(|token| {
+    while !token.is_cancelled() {
+        // Do work...
+        token.check()?; // Returns error if cancelled
+    }
+    Ok(())
+})?;
 ```
 
 ### Worker Statistics
