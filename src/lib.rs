@@ -114,11 +114,15 @@ pub mod core;
 pub mod pool;
 pub mod prelude;
 pub mod queue;
+pub mod typed;
 
 pub use core::{BoxedJob, CancellationToken, ClosureJob, Job, JobHandle, Result, ThreadError};
 #[cfg(feature = "priority-scheduling")]
 pub use core::{Priority, PriorityJob, PriorityQueue};
 pub use pool::{ThreadPool, ThreadPoolConfig, WorkerStats};
-pub use queue::{BoundedQueue, ChannelQueue, JobQueue, QueueCapabilities, QueueError, QueueResult};
 #[cfg(feature = "priority-scheduling")]
 pub use queue::PriorityJobQueue;
+pub use queue::{BoundedQueue, ChannelQueue, JobQueue, QueueCapabilities, QueueError, QueueResult};
+pub use typed::{
+    DefaultJobType, JobType, TypeStats, TypedClosureJob, TypedJob, TypedPoolConfig, TypedThreadPool,
+};
