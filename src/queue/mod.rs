@@ -7,6 +7,7 @@
 //!
 //! - [`ChannelQueue`]: Unbounded FIFO queue using crossbeam channels (default)
 //! - [`BoundedQueue`]: Bounded FIFO queue with configurable capacity
+//! - [`AdaptiveQueue`]: Auto-optimizing queue that switches between mutex and lock-free
 //! - [`PriorityJobQueue`]: Priority-based queue (requires `priority-scheduling` feature)
 //!
 //! # Custom Queues
@@ -25,12 +26,14 @@
 //!
 //! [`ThreadPool`]: crate::pool::ThreadPool
 
+mod adaptive;
 mod backpressure;
 mod bounded;
 mod channel;
 #[cfg(feature = "priority-scheduling")]
 mod priority;
 
+pub use adaptive::{AdaptiveQueue, AdaptiveQueueConfig, AdaptiveQueueStats, QueueStrategy};
 pub use backpressure::{
     BackpressureHandler, BackpressureStats, BackpressureStatsSnapshot, BackpressureStrategy,
 };
