@@ -17,6 +17,7 @@ A production-ready, high-performance Rust threading framework with worker pools 
 - **Typed Thread Pool**: Route jobs to dedicated queues based on job type for QoS guarantees
 - **Flexible Job Queues**: Support for both bounded and unbounded job queues
 - **Pluggable Queue Implementations**: Custom queues via `JobQueue` trait
+- **Backpressure Strategies**: Configurable handling for queue-full scenarios (block, timeout, reject, drop)
 - **Priority Scheduling**: Optional priority-based job execution (feature-gated)
 - **Worker Statistics**: Comprehensive metrics tracking per worker and pool-wide
 - **High Performance**: Built on crossbeam channels and parking_lot for optimal performance
@@ -162,6 +163,59 @@ match pool.execute(|| Ok(())) {
     Err(e) => println!("Error: {}", e),
 }
 ```
+
+### Backpressure Strategies
+
+Configure how the pool handles job submissions when the queue is full:
+
+```rust
+use rust_thread_system::prelude::*;
+use rust_thread_system::queue::BackpressureStrategy;
+use std::time::Duration;
+
+// Strategy 1: Reject immediately (for real-time systems)
+let config = ThreadPoolConfig::new(4)
+    .with_max_queue_size(100)
+    .reject_when_full();  // Returns error immediately when full
+let pool = ThreadPool::with_config(config)?;
+
+// Strategy 2: Block with timeout (for web servers)
+let config = ThreadPoolConfig::new(4)
+    .with_max_queue_size(100)
+    .block_with_timeout(Duration::from_secs(5));  // Wait up to 5 seconds
+
+// Strategy 3: Drop newest (for lossy streaming)
+let config = ThreadPoolConfig::new(4)
+    .with_max_queue_size(100)
+    .with_backpressure_strategy(BackpressureStrategy::DropNewest);  // Silently drop
+
+// Strategy 4: Custom handler
+use rust_thread_system::queue::BackpressureHandler;
+use std::sync::Arc;
+
+struct LogAndReject;
+impl BackpressureHandler for LogAndReject {
+    fn handle_backpressure(&self, _job: BoxedJob) -> Result<Option<BoxedJob>> {
+        eprintln!("Queue full, rejecting job");
+        Err(ThreadError::queue_full(0, 0))
+    }
+}
+
+let config = ThreadPoolConfig::new(4)
+    .with_max_queue_size(100)
+    .with_backpressure_strategy(BackpressureStrategy::Custom(Arc::new(LogAndReject)));
+```
+
+Available strategies:
+
+| Strategy | Behavior | Use Case |
+|----------|----------|----------|
+| `Block` | Wait indefinitely (default) | General purpose |
+| `BlockWithTimeout(Duration)` | Wait with timeout | Web servers, APIs |
+| `RejectImmediately` | Return error immediately | Real-time systems |
+| `DropNewest` | Silently drop new job | Lossy streaming, metrics |
+| `DropOldest` | Drop oldest job (coming soon) | Latest-value semantics |
+| `Custom(handler)` | User-defined logic | Complex retry logic |
 
 ### Non-Blocking Job Submission
 
