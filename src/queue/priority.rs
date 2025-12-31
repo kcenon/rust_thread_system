@@ -208,6 +208,23 @@ impl JobQueue for PriorityJobQueue {
             exact_size: true,
         }
     }
+
+    fn send_with_priority(&self, job: BoxedJob, priority: Priority) -> QueueResult<()> {
+        PriorityJobQueue::send_with_priority(self, job, priority)
+    }
+
+    fn try_send_with_priority(&self, job: BoxedJob, priority: Priority) -> QueueResult<()> {
+        PriorityJobQueue::try_send_with_priority(self, job, priority)
+    }
+
+    fn send_with_priority_timeout(
+        &self,
+        job: BoxedJob,
+        priority: Priority,
+        timeout: Duration,
+    ) -> QueueResult<()> {
+        PriorityJobQueue::send_with_priority_timeout(self, job, priority, timeout)
+    }
 }
 
 #[cfg(test)]
