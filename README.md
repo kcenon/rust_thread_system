@@ -284,7 +284,38 @@ Available queue implementations:
 |------------|-------------|----------|
 | `ChannelQueue` | Unbounded FIFO queue | Default, high throughput |
 | `BoundedQueue` | Bounded FIFO with capacity limit | Memory-constrained environments |
+| `AdaptiveQueue` | Auto-switching mutex/lock-free | Variable load patterns |
 | `PriorityJobQueue` | Priority-based ordering | Task prioritization (feature-gated) |
+
+### Adaptive Queue
+
+For workloads with variable contention patterns, use `AdaptiveQueue` which automatically
+switches between mutex-based and lock-free strategies:
+
+```rust
+use rust_thread_system::queue::{AdaptiveQueue, AdaptiveQueueConfig, QueueStrategy, JobQueue};
+use std::time::Duration;
+
+// Configure adaptive behavior
+let config = AdaptiveQueueConfig {
+    high_contention_threshold: 0.7,  // Switch to lock-free above 70% contention
+    low_contention_threshold: 0.3,   // Switch back to mutex below 30%
+    measurement_window: 1000,        // Measure over 1000 operations
+    switch_cooldown: Duration::from_millis(100),
+    initial_strategy: QueueStrategy::Mutex,
+};
+
+let queue = AdaptiveQueue::new(config);
+
+// Queue automatically adapts to workload
+// - Low contention: uses efficient mutex-based queue
+// - High contention: switches to lock-free queue
+// - Load decreases: switches back to mutex
+
+// Monitor queue behavior
+let stats = queue.stats();
+println!("Strategy: {:?}, Switches: {}", stats.current_strategy, stats.switch_count);
+```
 
 ### Priority Scheduling
 
