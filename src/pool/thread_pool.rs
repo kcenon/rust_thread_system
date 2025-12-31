@@ -6,7 +6,10 @@ use crate::core::{CancellationToken, ClosureJob, Job, JobHandle, Result, ThreadE
 use crate::pool::worker::{Worker, WorkerStats};
 #[cfg(feature = "priority-scheduling")]
 use crate::queue::PriorityJobQueue;
-use crate::queue::{BackpressureStrategy, BoundedQueue, ChannelQueue, JobQueue, QueueError};
+use crate::queue::{
+    BackpressureStrategy, BoundedQueue, ChannelQueue, JobQueue, QueueError, QueueFactory,
+    QueueRequirements,
+};
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -246,6 +249,123 @@ impl ThreadPoolConfig {
     pub fn enable_priority(mut self, enable: bool) -> Self {
         self.enable_priority = enable;
         self
+    }
+
+    /// Creates the pool with a queue matching the specified requirements.
+    ///
+    /// Uses [`QueueFactory`] to create an appropriate queue implementation
+    /// based on the given requirements.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requirements cannot be satisfied.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use rust_thread_system::prelude::*;
+    /// use rust_thread_system::queue::QueueRequirements;
+    ///
+    /// let config = ThreadPoolConfig::new(4)
+    ///     .with_queue_requirements(
+    ///         QueueRequirements::new().bounded(1000)
+    ///     )?;
+    ///
+    /// let pool = ThreadPool::with_config(config)?;
+    /// ```
+    pub fn with_queue_requirements(mut self, requirements: QueueRequirements) -> Result<Self> {
+        self.queue = Some(QueueFactory::create(requirements)?);
+        Ok(self)
+    }
+
+    /// Preset: Web server configuration.
+    ///
+    /// Creates a configuration optimized for web server workloads:
+    /// - Bounded queue to prevent memory exhaustion
+    /// - Timeout-based backpressure
+    ///
+    /// # Arguments
+    ///
+    /// * `capacity` - Maximum pending request queue size
+    /// * `timeout` - Request submission timeout
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use rust_thread_system::prelude::*;
+    /// use std::time::Duration;
+    ///
+    /// let config = ThreadPoolConfig::new(8)
+    ///     .for_web_server(5000, Duration::from_secs(30));
+    ///
+    /// let pool = ThreadPool::with_config(config)?;
+    /// ```
+    #[must_use = "builder methods return a new value and do not modify the original"]
+    pub fn for_web_server(self, capacity: usize, timeout: Duration) -> Self {
+        self.with_queue(QueueFactory::web_server(capacity, timeout))
+            .with_backpressure_strategy(BackpressureStrategy::BlockWithTimeout(timeout))
+    }
+
+    /// Preset: Background jobs configuration.
+    ///
+    /// Creates a configuration optimized for background job processing:
+    /// - Unbounded queue (jobs should never be dropped)
+    /// - Priority scheduling if available
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use rust_thread_system::prelude::*;
+    ///
+    /// let config = ThreadPoolConfig::new(4).for_background_jobs();
+    /// let pool = ThreadPool::with_config(config)?;
+    /// ```
+    #[must_use = "builder methods return a new value and do not modify the original"]
+    pub fn for_background_jobs(self) -> Self {
+        self.with_queue(QueueFactory::background_jobs())
+    }
+
+    /// Preset: Real-time processing configuration.
+    ///
+    /// Creates a configuration optimized for real-time event processing:
+    /// - Bounded queue to prevent memory growth
+    /// - Immediate rejection when full (no blocking)
+    ///
+    /// # Arguments
+    ///
+    /// * `capacity` - Maximum event buffer size
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use rust_thread_system::prelude::*;
+    ///
+    /// let config = ThreadPoolConfig::new(4).for_realtime(1000);
+    /// let pool = ThreadPool::with_config(config)?;
+    /// ```
+    #[must_use = "builder methods return a new value and do not modify the original"]
+    pub fn for_realtime(self, capacity: usize) -> Self {
+        self.with_queue(QueueFactory::realtime(capacity))
+            .with_backpressure_strategy(BackpressureStrategy::RejectImmediately)
+    }
+
+    /// Preset: Data pipeline configuration.
+    ///
+    /// Creates a configuration optimized for data pipelines:
+    /// - Adaptive queue for varying load patterns
+    /// - High throughput optimization
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use rust_thread_system::prelude::*;
+    ///
+    /// let config = ThreadPoolConfig::new(8).for_data_pipeline();
+    /// let pool = ThreadPool::with_config(config)?;
+    /// ```
+    #[must_use = "builder methods return a new value and do not modify the original"]
+    pub fn for_data_pipeline(self) -> Self {
+        self.with_queue(QueueFactory::data_pipeline())
     }
 
     /// Validate configuration
