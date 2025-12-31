@@ -91,6 +91,13 @@ pub enum ThreadError {
     #[error("Failed to send job to queue")]
     QueueSendError,
 
+    /// Job submission timed out waiting for queue space
+    #[error("Job submission timed out after {timeout_ms}ms")]
+    SubmissionTimeout {
+        /// Timeout duration in milliseconds
+        timeout_ms: u64,
+    },
+
     /// Invalid configuration with parameter
     #[error("Invalid configuration for '{parameter}': {message}")]
     InvalidConfig {
@@ -209,6 +216,11 @@ impl ThreadError {
             parameter: parameter.into(),
             message: message.into(),
         }
+    }
+
+    /// Create a submission timeout error
+    pub fn submission_timeout(timeout_ms: u64) -> Self {
+        ThreadError::SubmissionTimeout { timeout_ms }
     }
 
     /// Create a worker panic error
