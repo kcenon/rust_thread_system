@@ -1588,4 +1588,235 @@ mod tests {
         let result = pool.execute_with_priority(|| Ok(()), Priority::High);
         assert!(matches!(result, Err(ThreadError::NotRunning { .. })));
     }
+
+    // Backpressure strategy tests
+
+    #[test]
+    fn test_backpressure_block_default() {
+        // Default strategy is Block
+        let config = ThreadPoolConfig::new(2).with_max_queue_size(10);
+        assert!(matches!(
+            config.backpressure_strategy,
+            BackpressureStrategy::Block
+        ));
+    }
+
+    #[test]
+    fn test_backpressure_reject_immediately() {
+        // Use a very small queue to easily fill it
+        let config = ThreadPoolConfig::new(1)
+            .with_max_queue_size(1)
+            .reject_when_full();
+        let pool = ThreadPool::with_config(config).expect("Failed to create thread pool");
+        pool.start().expect("Failed to start pool");
+
+        // Use a channel to signal when the first job starts executing
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+
+        // Submit a job that blocks the worker
+        pool.execute(move || {
+            started_tx.send(()).unwrap();
+            let _ = done_rx.recv();
+            Ok(())
+        })
+        .expect("Failed to submit first job");
+
+        // Wait for the worker to pick up the first job
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("First job should start within 5 seconds");
+
+        // Fill the queue (size 1)
+        pool.execute(|| Ok(())).expect("Failed to fill queue");
+
+        // This should fail immediately with QueueFull
+        let result = pool.execute(|| Ok(()));
+        assert!(
+            matches!(result, Err(ThreadError::QueueFull { .. })),
+            "Expected QueueFull error, got: {:?}",
+            result
+        );
+
+        // Release the blocking job
+        let _ = done_tx.send(());
+        pool.shutdown().expect("Failed to shutdown pool");
+    }
+
+    #[test]
+    fn test_backpressure_block_with_timeout() {
+        let config = ThreadPoolConfig::new(1)
+            .with_max_queue_size(1)
+            .block_with_timeout(Duration::from_millis(50));
+        let pool = ThreadPool::with_config(config).expect("Failed to create thread pool");
+        pool.start().expect("Failed to start pool");
+
+        // Use a channel to signal when the first job starts executing
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+
+        // Submit a job that blocks the worker
+        pool.execute(move || {
+            started_tx.send(()).unwrap();
+            let _ = done_rx.recv();
+            Ok(())
+        })
+        .expect("Failed to submit first job");
+
+        // Wait for the worker to pick up the first job
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("First job should start within 5 seconds");
+
+        // Fill the queue (size 1)
+        pool.execute(|| Ok(())).expect("Failed to fill queue");
+
+        // This should timeout
+        let start = std::time::Instant::now();
+        let result = pool.execute(|| Ok(()));
+        let elapsed = start.elapsed();
+
+        assert!(
+            matches!(result, Err(ThreadError::SubmissionTimeout { .. })),
+            "Expected SubmissionTimeout error, got: {:?}",
+            result
+        );
+        assert!(
+            elapsed >= Duration::from_millis(40),
+            "Should have waited at least 40ms, but only waited {:?}",
+            elapsed
+        );
+
+        // Release the blocking job
+        let _ = done_tx.send(());
+        pool.shutdown().expect("Failed to shutdown pool");
+    }
+
+    #[test]
+    fn test_backpressure_drop_newest() {
+        let config = ThreadPoolConfig::new(1)
+            .with_max_queue_size(1)
+            .with_backpressure_strategy(BackpressureStrategy::DropNewest);
+        let pool = ThreadPool::with_config(config).expect("Failed to create thread pool");
+        pool.start().expect("Failed to start pool");
+
+        // Use a channel to signal when the first job starts executing
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+
+        // Submit a job that blocks the worker
+        pool.execute(move || {
+            started_tx.send(()).unwrap();
+            let _ = done_rx.recv();
+            Ok(())
+        })
+        .expect("Failed to submit first job");
+
+        // Wait for the worker to pick up the first job
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("First job should start within 5 seconds");
+
+        // Fill the queue (size 1)
+        pool.execute(|| Ok(())).expect("Failed to fill queue");
+
+        // This should succeed (job is silently dropped)
+        let result = pool.execute(|| Ok(()));
+        assert!(result.is_ok(), "DropNewest should not return error");
+
+        // Release the blocking job
+        let _ = done_tx.send(());
+        pool.shutdown().expect("Failed to shutdown pool");
+    }
+
+    #[test]
+    fn test_backpressure_custom_handler() {
+        use crate::queue::BackpressureHandler;
+        use std::sync::atomic::AtomicBool;
+
+        struct TestHandler {
+            was_called: Arc<AtomicBool>,
+        }
+
+        impl BackpressureHandler for TestHandler {
+            fn handle_backpressure(
+                &self,
+                _job: crate::core::BoxedJob,
+            ) -> crate::core::Result<Option<crate::core::BoxedJob>> {
+                self.was_called.store(true, Ordering::SeqCst);
+                Ok(None) // Drop the job
+            }
+        }
+
+        let was_called = Arc::new(AtomicBool::new(false));
+        let handler = Arc::new(TestHandler {
+            was_called: Arc::clone(&was_called),
+        });
+
+        let config = ThreadPoolConfig::new(1)
+            .with_max_queue_size(1)
+            .with_backpressure_strategy(BackpressureStrategy::Custom(handler));
+        let pool = ThreadPool::with_config(config).expect("Failed to create thread pool");
+        pool.start().expect("Failed to start pool");
+
+        // Use a channel to signal when the first job starts executing
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+
+        // Submit a job that blocks the worker
+        pool.execute(move || {
+            started_tx.send(()).unwrap();
+            let _ = done_rx.recv();
+            Ok(())
+        })
+        .expect("Failed to submit first job");
+
+        // Wait for the worker to pick up the first job
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("First job should start within 5 seconds");
+
+        // Fill the queue (size 1)
+        pool.execute(|| Ok(())).expect("Failed to fill queue");
+
+        // This should trigger the custom handler
+        let result = pool.execute(|| Ok(()));
+        assert!(result.is_ok(), "Custom handler returned Ok(None)");
+        assert!(
+            was_called.load(Ordering::SeqCst),
+            "Custom handler should have been called"
+        );
+
+        // Release the blocking job
+        let _ = done_tx.send(());
+        pool.shutdown().expect("Failed to shutdown pool");
+    }
+
+    #[test]
+    fn test_backpressure_config_convenience_methods() {
+        // Test reject_when_full
+        let config = ThreadPoolConfig::new(2).reject_when_full();
+        assert!(matches!(
+            config.backpressure_strategy,
+            BackpressureStrategy::RejectImmediately
+        ));
+
+        // Test block_with_timeout
+        let timeout = Duration::from_secs(5);
+        let config = ThreadPoolConfig::new(2).block_with_timeout(timeout);
+        match config.backpressure_strategy {
+            BackpressureStrategy::BlockWithTimeout(t) => {
+                assert_eq!(t, timeout);
+            }
+            _ => panic!("Expected BlockWithTimeout"),
+        }
+
+        // Test with_backpressure_strategy
+        let config = ThreadPoolConfig::new(2)
+            .with_backpressure_strategy(BackpressureStrategy::DropNewest);
+        assert!(matches!(
+            config.backpressure_strategy,
+            BackpressureStrategy::DropNewest
+        ));
+    }
 }
