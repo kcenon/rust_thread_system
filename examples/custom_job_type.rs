@@ -52,25 +52,37 @@ fn main() -> Result<()> {
 
     // Create a pool optimized for game workloads
     let config = TypedPoolConfig::<GameJobType>::new()
-        .workers_for(GameJobType::Physics, 2)    // Physics needs consistency
-        .workers_for(GameJobType::Rendering, 4)  // GPU-bound, needs parallelism
-        .workers_for(GameJobType::Audio, 1)      // Single audio thread
-        .workers_for(GameJobType::Network, 4)    // IO-bound, high concurrency
-        .workers_for(GameJobType::AI, 2)         // CPU-bound AI calculations
+        .workers_for(GameJobType::Physics, 2) // Physics needs consistency
+        .workers_for(GameJobType::Rendering, 4) // GPU-bound, needs parallelism
+        .workers_for(GameJobType::Audio, 1) // Single audio thread
+        .workers_for(GameJobType::Network, 4) // IO-bound, high concurrency
+        .workers_for(GameJobType::AI, 2) // CPU-bound AI calculations
         .type_priority(vec![
-            GameJobType::Rendering,  // Frame rendering is critical
-            GameJobType::Physics,    // Physics affects rendering
-            GameJobType::Audio,      // Audio glitches are noticeable
-            GameJobType::Network,    // Network can be slightly delayed
-            GameJobType::AI,         // AI can be deferred
+            GameJobType::Rendering, // Frame rendering is critical
+            GameJobType::Physics,   // Physics affects rendering
+            GameJobType::Audio,     // Audio glitches are noticeable
+            GameJobType::Network,   // Network can be slightly delayed
+            GameJobType::AI,        // AI can be deferred
         ])
         .with_thread_name_prefix("game-worker");
 
     println!("Game Engine Thread Pool Configuration:");
-    println!("  Physics workers: {}", config.get_workers_for(GameJobType::Physics));
-    println!("  Rendering workers: {}", config.get_workers_for(GameJobType::Rendering));
-    println!("  Audio workers: {}", config.get_workers_for(GameJobType::Audio));
-    println!("  Network workers: {}", config.get_workers_for(GameJobType::Network));
+    println!(
+        "  Physics workers: {}",
+        config.get_workers_for(GameJobType::Physics)
+    );
+    println!(
+        "  Rendering workers: {}",
+        config.get_workers_for(GameJobType::Rendering)
+    );
+    println!(
+        "  Audio workers: {}",
+        config.get_workers_for(GameJobType::Audio)
+    );
+    println!(
+        "  Network workers: {}",
+        config.get_workers_for(GameJobType::Network)
+    );
     println!("  AI workers: {}", config.get_workers_for(GameJobType::AI));
     println!("  Total workers: {}", config.total_workers());
     println!();
@@ -145,13 +157,19 @@ fn main() -> Result<()> {
     thread::sleep(Duration::from_millis(500));
 
     println!("\n=== Frame Statistics ===\n");
-    println!("Total jobs in frame: {}", frame_counter.load(Ordering::Relaxed));
+    println!(
+        "Total jobs in frame: {}",
+        frame_counter.load(Ordering::Relaxed)
+    );
 
     // Print per-type statistics
     for job_type in GameJobType::all_variants() {
         if let Some(stats) = pool.type_stats(*job_type) {
             println!("{:?}:", job_type);
-            println!("  Completed: {}/{}", stats.jobs_completed, stats.jobs_submitted);
+            println!(
+                "  Completed: {}/{}",
+                stats.jobs_completed, stats.jobs_submitted
+            );
             println!("  Avg latency: {:?}", stats.avg_latency);
         }
     }

@@ -28,10 +28,22 @@ fn main() -> Result<()> {
         ]);
 
     println!("Configuration:");
-    println!("  Critical workers: {}", config.get_workers_for(DefaultJobType::Critical));
-    println!("  Compute workers: {}", config.get_workers_for(DefaultJobType::Compute));
-    println!("  IO workers: {}", config.get_workers_for(DefaultJobType::Io));
-    println!("  Background workers: {}", config.get_workers_for(DefaultJobType::Background));
+    println!(
+        "  Critical workers: {}",
+        config.get_workers_for(DefaultJobType::Critical)
+    );
+    println!(
+        "  Compute workers: {}",
+        config.get_workers_for(DefaultJobType::Compute)
+    );
+    println!(
+        "  IO workers: {}",
+        config.get_workers_for(DefaultJobType::Io)
+    );
+    println!(
+        "  Background workers: {}",
+        config.get_workers_for(DefaultJobType::Background)
+    );
     println!("  Total workers: {}", config.total_workers());
     println!();
 
