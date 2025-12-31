@@ -689,6 +689,129 @@ impl ThreadPool {
         Ok(handle)
     }
 
+    /// Submit a closure with an external cancellation token
+    ///
+    /// This allows sharing a cancellation token across multiple jobs or using
+    /// a hierarchical token structure. The job will be cancelled when the
+    /// provided token is cancelled.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use rust_thread_system::prelude::*;
+    /// use std::time::Duration;
+    ///
+    /// # fn main() -> Result<()> {
+    /// let pool = ThreadPool::with_threads(2)?;
+    /// pool.start()?;
+    ///
+    /// // Create a parent token with timeout
+    /// let scope = CancellationToken::with_timeout(Duration::from_secs(30));
+    ///
+    /// // Submit multiple jobs sharing the same cancellation scope
+    /// let child1 = scope.child();
+    /// pool.execute_with_token(|| {
+    ///     // Do work...
+    ///     Ok(())
+    /// }, child1)?;
+    ///
+    /// let child2 = scope.child();
+    /// pool.execute_with_token(|| {
+    ///     // Do work...
+    ///     Ok(())
+    /// }, child2)?;
+    ///
+    /// // Cancelling the scope cancels all child jobs
+    /// scope.cancel();
+    /// # pool.shutdown()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn execute_with_token<F>(&self, f: F, token: CancellationToken) -> Result<JobHandle>
+    where
+        F: FnOnce() -> Result<()> + Send + 'static,
+    {
+        let handle = JobHandle::new();
+        let job_id = handle.job_id();
+
+        // Wrap the closure to check cancellation before execution
+        let job = CancellableJob::new(job_id, token, move |_| f());
+
+        self.submit(job)?;
+
+        Ok(handle)
+    }
+
+    /// Creates a cancellation scope for a batch of jobs
+    ///
+    /// All jobs submitted with child tokens of this scope can be cancelled
+    /// together by cancelling the returned token.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use rust_thread_system::prelude::*;
+    ///
+    /// # fn main() -> Result<()> {
+    /// let pool = ThreadPool::with_threads(2)?;
+    /// pool.start()?;
+    ///
+    /// // Create a cancellation scope
+    /// let scope = pool.cancellation_scope();
+    ///
+    /// // Submit jobs with child tokens
+    /// for i in 0..5 {
+    ///     let child = scope.child();
+    ///     pool.execute_with_token(move || {
+    ///         println!("Job {} running", i);
+    ///         Ok(())
+    ///     }, child)?;
+    /// }
+    ///
+    /// // Cancel all jobs in the scope
+    /// scope.cancel();
+    /// # pool.shutdown()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn cancellation_scope(&self) -> CancellationToken {
+        CancellationToken::new()
+    }
+
+    /// Creates a cancellation scope with a timeout
+    ///
+    /// All jobs submitted with child tokens of this scope will be cancelled
+    /// when the timeout expires or when the scope is cancelled manually.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use rust_thread_system::prelude::*;
+    /// use std::time::Duration;
+    ///
+    /// # fn main() -> Result<()> {
+    /// let pool = ThreadPool::with_threads(2)?;
+    /// pool.start()?;
+    ///
+    /// // Create a scope that auto-cancels after 30 seconds
+    /// let scope = pool.cancellation_scope_with_timeout(Duration::from_secs(30));
+    ///
+    /// // Submit jobs with child tokens
+    /// let child = scope.child();
+    /// pool.execute_with_token(|| {
+    ///     // Long-running work...
+    ///     Ok(())
+    /// }, child)?;
+    ///
+    /// // Jobs will be cancelled if they take longer than 30 seconds
+    /// # pool.shutdown()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn cancellation_scope_with_timeout(&self, timeout: Duration) -> CancellationToken {
+        CancellationToken::with_timeout(timeout)
+    }
+
     /// Attempts to submit a job without blocking.
     ///
     /// Returns immediately if the queue is full instead of waiting for space.
