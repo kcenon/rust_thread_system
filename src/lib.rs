@@ -127,7 +127,8 @@ pub use pool::{ThreadPool, ThreadPoolConfig, WorkerStats};
 pub use queue::PriorityJobQueue;
 pub use queue::{
     BackpressureHandler, BackpressureStats, BackpressureStatsSnapshot, BackpressureStrategy,
-    BoundedQueue, ChannelQueue, JobQueue, QueueCapabilities, QueueError, QueueResult,
+    BoundedQueue, ChannelQueue, JobQueue, QueueCapabilities, QueueError, QueueFactory,
+    QueueRequirements, QueueResult,
 };
 pub use typed::{
     DefaultJobType, JobType, TypeStats, TypedClosureJob, TypedJob, TypedPoolConfig, TypedThreadPool,

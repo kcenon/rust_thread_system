@@ -30,6 +30,7 @@ mod adaptive;
 mod backpressure;
 mod bounded;
 mod channel;
+mod factory;
 #[cfg(feature = "priority-scheduling")]
 mod priority;
 
@@ -39,6 +40,7 @@ pub use backpressure::{
 };
 pub use bounded::BoundedQueue;
 pub use channel::ChannelQueue;
+pub use factory::{QueueFactory, QueueRequirements};
 #[cfg(feature = "priority-scheduling")]
 pub use priority::PriorityJobQueue;
 

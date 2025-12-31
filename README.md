@@ -288,6 +288,66 @@ Available queue implementations:
 | `AdaptiveQueue` | Auto-switching mutex/lock-free | Variable load patterns |
 | `PriorityJobQueue` | Priority-based ordering | Task prioritization (feature-gated) |
 
+### Queue Factory
+
+Use `QueueFactory` to create queues based on requirements without understanding implementation details:
+
+```rust
+use rust_thread_system::queue::{QueueFactory, QueueRequirements};
+use std::time::Duration;
+
+// Create a queue with specific requirements
+let queue = QueueFactory::create(
+    QueueRequirements::new()
+        .bounded(1000)
+).unwrap();
+
+// Use convenience methods for common patterns
+let high_throughput = QueueFactory::high_throughput();
+let low_latency = QueueFactory::low_latency(500);
+let adaptive = QueueFactory::auto_optimized();
+
+// Use presets for specific use cases
+let web_queue = QueueFactory::web_server(5000, Duration::from_secs(30));
+let background_queue = QueueFactory::background_jobs();
+let realtime_queue = QueueFactory::realtime(1000);
+let pipeline_queue = QueueFactory::data_pipeline();
+```
+
+Integrate with `ThreadPoolConfig` using presets:
+
+```rust
+use rust_thread_system::prelude::*;
+use std::time::Duration;
+
+// Web server preset: bounded queue with timeout backpressure
+let config = ThreadPoolConfig::new(8)
+    .for_web_server(5000, Duration::from_secs(30));
+
+// Background jobs preset: unbounded with priority support
+let config = ThreadPoolConfig::new(4)
+    .for_background_jobs();
+
+// Real-time preset: bounded with immediate rejection
+let config = ThreadPoolConfig::new(4)
+    .for_realtime(1000);
+
+// Data pipeline preset: adaptive queue for varying loads
+let config = ThreadPoolConfig::new(8)
+    .for_data_pipeline();
+
+let pool = ThreadPool::with_config(config)?;
+```
+
+Queue selection matrix:
+
+| Requirements | Selected Queue |
+|-------------|----------------|
+| Default | `ChannelQueue` (unbounded) |
+| `bounded(N)` | `BoundedQueue` |
+| `adaptive()` | `AdaptiveQueue` |
+| `with_priority()` | `PriorityJobQueue` |
+
 ### Adaptive Queue
 
 For workloads with variable contention patterns, use `AdaptiveQueue` which automatically
