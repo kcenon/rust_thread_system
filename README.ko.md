@@ -31,7 +31,7 @@ use rust_thread_system::prelude::*;
 
 fn main() -> Result<()> {
     // Create and start a thread pool
-    let mut pool = ThreadPool::with_threads(4)?;
+    let pool = ThreadPool::with_threads(4)?;
     pool.start()?;
 
     // Submit jobs using closures
@@ -71,7 +71,7 @@ fn main() -> Result<()> {
 ```rust
 use rust_thread_system::prelude::*;
 
-let mut pool = ThreadPool::with_threads(4)?;
+let pool = ThreadPool::with_threads(4)?;
 pool.start()?;
 
 pool.execute(|| {
@@ -93,7 +93,7 @@ let config = ThreadPoolConfig::new(8)
     .with_thread_name_prefix("my-worker")
     .with_poll_interval(Duration::from_millis(50));  // 더 빠른 응답성
 
-let mut pool = ThreadPool::with_config(config)?;
+let pool = ThreadPool::with_config(config)?;
 pool.start()?;
 ```
 
@@ -139,7 +139,7 @@ use rust_thread_system::prelude::*;
 
 // Create pool with bounded queue to prevent memory exhaustion
 let config = ThreadPoolConfig::new(4).with_max_queue_size(100);
-let mut pool = ThreadPool::with_config(config)?;
+let pool = ThreadPool::with_config(config)?;
 pool.start()?;
 
 // Jobs will be rejected if queue is full
@@ -157,7 +157,7 @@ use rust_thread_system::prelude::*;
 use std::time::Duration;
 
 let config = ThreadPoolConfig::new(4).with_max_queue_size(100);
-let mut pool = ThreadPool::with_config(config)?;
+let pool = ThreadPool::with_config(config)?;
 pool.start()?;
 
 // try_execute는 큐가 가득 차면 즉시 반환

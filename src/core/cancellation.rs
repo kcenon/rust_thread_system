@@ -99,7 +99,7 @@ impl Default for CancellationToken {
 /// use rust_thread_system::{ThreadPool, JobHandle, CancellationToken};
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let mut pool = ThreadPool::new()?;
+/// let pool = ThreadPool::new()?;
 /// pool.start()?;
 ///
 /// // FIXED: submit_cancellable requires FnOnce(CancellationToken) -> Result<()>

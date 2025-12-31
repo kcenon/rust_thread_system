@@ -86,7 +86,7 @@ proptest! {
     /// Test that multiple jobs can be executed successfully
     #[test]
     fn test_multiple_job_execution(job_count in 1usize..50) {
-        let mut pool = ThreadPool::with_threads(4).unwrap();
+        let pool = ThreadPool::with_threads(4).unwrap();
         pool.start().unwrap();
 
         let counter = Arc::new(AtomicUsize::new(0));
@@ -113,7 +113,7 @@ proptest! {
     /// Test that job results are processed correctly
     #[test]
     fn test_job_execution_with_data(values in prop::collection::vec(any::<i32>(), 1..20)) {
-        let mut pool = ThreadPool::with_threads(2).unwrap();
+        let pool = ThreadPool::with_threads(2).unwrap();
         pool.start().unwrap();
 
         let counter = Arc::new(AtomicUsize::new(0));
@@ -150,7 +150,7 @@ proptest! {
         let config = ThreadPoolConfig::new(threads)
             .with_max_queue_size(max_queue);
 
-        let mut pool = ThreadPool::with_config(config).unwrap();
+        let pool = ThreadPool::with_config(config).unwrap();
         pool.start().unwrap();
 
         let mut successful_submissions = 0;
@@ -198,7 +198,7 @@ proptest! {
         panic_count in 1usize..10,
         success_count in 1usize..10
     ) {
-        let mut pool = ThreadPool::with_threads(2).unwrap();
+        let pool = ThreadPool::with_threads(2).unwrap();
         pool.start().unwrap();
 
         let counter = Arc::new(AtomicUsize::new(0));
@@ -241,7 +241,7 @@ proptest! {
     /// Test that worker statistics are tracked correctly
     #[test]
     fn test_worker_stats(job_count in 10usize..50) {
-        let mut pool = ThreadPool::with_threads(4).unwrap();
+        let pool = ThreadPool::with_threads(4).unwrap();
         pool.start().unwrap();
 
         // Submit jobs
@@ -268,7 +268,7 @@ proptest! {
         threads in 2usize..8,
         jobs in 20usize..100
     ) {
-        let mut pool = ThreadPool::with_threads(threads).unwrap();
+        let pool = ThreadPool::with_threads(threads).unwrap();
         pool.start().unwrap();
 
         // Submit jobs
@@ -313,7 +313,7 @@ proptest! {
     /// Test that shutdown is always safe
     #[test]
     fn test_shutdown_always_safe(threads in 1usize..8) {
-        let mut pool = ThreadPool::with_threads(threads).unwrap();
+        let pool = ThreadPool::with_threads(threads).unwrap();
         pool.start().unwrap();
 
         // Submit a few jobs
@@ -329,7 +329,7 @@ proptest! {
     /// Test that double shutdown is safe
     #[test]
     fn test_double_shutdown_safe(threads in 1usize..4) {
-        let mut pool = ThreadPool::with_threads(threads).unwrap();
+        let pool = ThreadPool::with_threads(threads).unwrap();
         pool.start().unwrap();
 
         // First shutdown

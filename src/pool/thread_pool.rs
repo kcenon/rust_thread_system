@@ -205,7 +205,13 @@ impl ThreadPool {
     ///
     /// The pool can be restarted after shutdown by calling start() again.
     /// Workers will be recreated with a new channel.
-    pub fn start(&mut self) -> Result<()> {
+    ///
+    /// # Thread Safety
+    ///
+    /// This method uses interior mutability and can be called from `&self`.
+    /// Multiple concurrent calls are safe - only the first will succeed,
+    /// others will receive an `AlreadyRunning` error.
+    pub fn start(&self) -> Result<()> {
         // Atomically check and set running flag to prevent race condition
         // Multiple threads calling start() simultaneously will now be serialized
         // Only the first thread will succeed, others will get AlreadyRunning error
@@ -312,7 +318,7 @@ impl ThreadPool {
     /// use std::time::Duration;
     ///
     /// # fn main() -> Result<()> {
-    /// let mut pool = ThreadPool::with_threads(2)?;
+    /// let pool = ThreadPool::with_threads(2)?;
     /// pool.start()?;
     ///
     /// let handle = pool.submit_cancellable(|token| {
@@ -366,7 +372,7 @@ impl ThreadPool {
     ///
     /// # fn main() -> Result<()> {
     /// let config = ThreadPoolConfig::new(2).with_max_queue_size(10);
-    /// let mut pool = ThreadPool::with_config(config)?;
+    /// let pool = ThreadPool::with_config(config)?;
     /// pool.start()?;
     ///
     /// match pool.try_execute(|| {
@@ -457,7 +463,7 @@ impl ThreadPool {
     ///
     /// # fn main() -> Result<()> {
     /// let config = ThreadPoolConfig::new(2).with_max_queue_size(10);
-    /// let mut pool = ThreadPool::with_config(config)?;
+    /// let pool = ThreadPool::with_config(config)?;
     /// pool.start()?;
     ///
     /// match pool.execute_timeout(|| {
@@ -584,7 +590,13 @@ impl ThreadPool {
     /// 3. Waits for all workers to drain queued jobs and exit
     ///
     /// This ensures all queued jobs are processed before shutdown completes.
-    pub fn shutdown(&mut self) -> Result<()> {
+    ///
+    /// # Thread Safety
+    ///
+    /// This method uses interior mutability and can be called from `&self`.
+    /// Multiple concurrent calls are safe - only the first will perform the
+    /// shutdown, others will return immediately.
+    pub fn shutdown(&self) -> Result<()> {
         if !self.running.load(Ordering::Acquire) {
             return Ok(());
         }
@@ -630,7 +642,7 @@ mod tests {
 
     #[test]
     fn test_thread_pool_creation() {
-        let mut pool = ThreadPool::new().expect("Failed to create thread pool");
+        let pool = ThreadPool::new().expect("Failed to create thread pool");
         assert!(!pool.is_running());
 
         pool.start().expect("Failed to start pool");
@@ -643,7 +655,7 @@ mod tests {
 
     #[test]
     fn test_thread_pool_with_threads() {
-        let mut pool = ThreadPool::with_threads(4).expect("Failed to create thread pool");
+        let pool = ThreadPool::with_threads(4).expect("Failed to create thread pool");
         pool.start().expect("Failed to start pool");
         assert_eq!(pool.num_threads(), 4);
         pool.shutdown().expect("Failed to shutdown pool");
@@ -651,7 +663,7 @@ mod tests {
 
     #[test]
     fn test_job_execution() {
-        let mut pool = ThreadPool::with_threads(2).expect("Failed to create thread pool");
+        let pool = ThreadPool::with_threads(2).expect("Failed to create thread pool");
         pool.start().expect("Failed to start pool");
 
         let counter = Arc::new(AtomicUsize::new(0));
@@ -678,7 +690,7 @@ mod tests {
     #[test]
     fn test_bounded_queue() {
         let config = ThreadPoolConfig::new(2).with_max_queue_size(5);
-        let mut pool = ThreadPool::with_config(config).expect("Failed to create thread pool");
+        let pool = ThreadPool::with_config(config).expect("Failed to create thread pool");
         pool.start().expect("Failed to start pool");
 
         // Submit jobs until queue is full
@@ -712,7 +724,7 @@ mod tests {
 
     #[test]
     fn test_stress_high_load() {
-        let mut pool = ThreadPool::with_threads(4).expect("Failed to create thread pool");
+        let pool = ThreadPool::with_threads(4).expect("Failed to create thread pool");
         pool.start().expect("Failed to start pool");
 
         let counter = Arc::new(AtomicUsize::new(0));
@@ -744,7 +756,7 @@ mod tests {
     fn test_concurrent_submit() {
         use std::sync::Arc;
 
-        let mut pool = ThreadPool::with_threads(4).expect("Failed to create thread pool");
+        let pool = ThreadPool::with_threads(4).expect("Failed to create thread pool");
         pool.start().expect("Failed to start pool");
         let pool = Arc::new(pool);
 
@@ -779,13 +791,13 @@ mod tests {
         assert_eq!(counter.load(Ordering::Relaxed), 1000);
         assert_eq!(pool.total_jobs_submitted(), 1000);
 
-        // Note: can't call shutdown on Arc<ThreadPool>
-        // It will be dropped automatically
+        // Now we can call shutdown on Arc<ThreadPool> thanks to interior mutability
+        pool.shutdown().expect("Failed to shutdown pool");
     }
 
     #[test]
     fn test_shutdown_waits_for_jobs() {
-        let mut pool = ThreadPool::with_threads(2).expect("Failed to create thread pool");
+        let pool = ThreadPool::with_threads(2).expect("Failed to create thread pool");
         pool.start().expect("Failed to start pool");
 
         let counter = Arc::new(AtomicUsize::new(0));
@@ -815,7 +827,7 @@ mod tests {
 
     #[test]
     fn test_submit_after_shutdown() {
-        let mut pool = ThreadPool::with_threads(2).expect("Failed to create thread pool");
+        let pool = ThreadPool::with_threads(2).expect("Failed to create thread pool");
         pool.start().expect("Failed to start pool");
 
         // Submit a job
@@ -831,7 +843,7 @@ mod tests {
 
     #[test]
     fn test_error_handling() {
-        let mut pool = ThreadPool::with_threads(2).expect("Failed to create thread pool");
+        let pool = ThreadPool::with_threads(2).expect("Failed to create thread pool");
         pool.start().expect("Failed to start pool");
 
         let counter = Arc::new(AtomicUsize::new(0));
@@ -869,7 +881,7 @@ mod tests {
         // Use a very small queue to easily fill it
         // 1 worker + queue size 2 = max 3 jobs can be "in flight"
         let config = ThreadPoolConfig::new(1).with_max_queue_size(2);
-        let mut pool = ThreadPool::with_config(config).expect("Failed to create thread pool");
+        let pool = ThreadPool::with_config(config).expect("Failed to create thread pool");
         pool.start().expect("Failed to start pool");
 
         // Use a channel to signal when the first job starts executing
@@ -913,7 +925,7 @@ mod tests {
     #[test]
     fn test_try_execute_succeeds_with_unbounded_queue() {
         let config = ThreadPoolConfig::new(2).with_max_queue_size(0); // unbounded
-        let mut pool = ThreadPool::with_config(config).expect("Failed to create thread pool");
+        let pool = ThreadPool::with_config(config).expect("Failed to create thread pool");
         pool.start().expect("Failed to start pool");
 
         let counter = Arc::new(AtomicUsize::new(0));
@@ -944,7 +956,7 @@ mod tests {
     #[test]
     fn test_execute_timeout_succeeds_within_timeout() {
         let config = ThreadPoolConfig::new(2).with_max_queue_size(10);
-        let mut pool = ThreadPool::with_config(config).expect("Failed to create thread pool");
+        let pool = ThreadPool::with_config(config).expect("Failed to create thread pool");
         pool.start().expect("Failed to start pool");
 
         let counter = Arc::new(AtomicUsize::new(0));
@@ -969,7 +981,7 @@ mod tests {
     fn test_execute_timeout_times_out_when_queue_full() {
         // Use a very small queue to easily fill it
         let config = ThreadPoolConfig::new(1).with_max_queue_size(1);
-        let mut pool = ThreadPool::with_config(config).expect("Failed to create thread pool");
+        let pool = ThreadPool::with_config(config).expect("Failed to create thread pool");
         pool.start().expect("Failed to start pool");
 
         // Use a channel to signal when the first job starts executing
@@ -1030,7 +1042,7 @@ mod tests {
     #[test]
     fn test_submit_timeout_with_unbounded_queue() {
         let config = ThreadPoolConfig::new(2).with_max_queue_size(0); // unbounded
-        let mut pool = ThreadPool::with_config(config).expect("Failed to create thread pool");
+        let pool = ThreadPool::with_config(config).expect("Failed to create thread pool");
         pool.start().expect("Failed to start pool");
 
         let counter = Arc::new(AtomicUsize::new(0));
@@ -1059,7 +1071,7 @@ mod tests {
         let config = ThreadPoolConfig::new(2).with_poll_interval(Duration::from_millis(50));
         assert_eq!(config.poll_interval, Duration::from_millis(50));
 
-        let mut pool = ThreadPool::with_config(config).expect("Failed to create thread pool");
+        let pool = ThreadPool::with_config(config).expect("Failed to create thread pool");
         pool.start().expect("Failed to start pool");
 
         let counter = Arc::new(AtomicUsize::new(0));
@@ -1093,7 +1105,7 @@ mod tests {
     fn test_short_poll_interval_faster_shutdown() {
         // Test that shorter poll interval results in faster shutdown detection
         let config = ThreadPoolConfig::new(1).with_poll_interval(Duration::from_millis(10));
-        let mut pool = ThreadPool::with_config(config).expect("Failed to create thread pool");
+        let pool = ThreadPool::with_config(config).expect("Failed to create thread pool");
         pool.start().expect("Failed to start pool");
 
         let start = std::time::Instant::now();
