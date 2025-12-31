@@ -69,6 +69,11 @@ impl PriorityJob {
     pub fn sequence(&self) -> u64 {
         self.sequence
     }
+
+    /// Consume the PriorityJob and return the inner job
+    pub fn into_job(self) -> BoxedJob {
+        self.job
+    }
 }
 
 /// Ordering for priority jobs in the heap
