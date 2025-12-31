@@ -6,7 +6,7 @@ use crate::core::{CancellationToken, ClosureJob, Job, JobHandle, Result, ThreadE
 use crate::pool::worker::{Worker, WorkerStats};
 #[cfg(feature = "priority-scheduling")]
 use crate::queue::PriorityJobQueue;
-use crate::queue::{BoundedQueue, ChannelQueue, JobQueue, QueueError};
+use crate::queue::{BackpressureStrategy, BoundedQueue, ChannelQueue, JobQueue, QueueError};
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -29,6 +29,9 @@ pub struct ThreadPoolConfig {
     pub poll_interval: Duration,
     /// Custom queue implementation (if None, uses default based on max_queue_size)
     queue: Option<Arc<dyn JobQueue>>,
+    /// Backpressure strategy for bounded queues.
+    /// Default: Block
+    pub backpressure_strategy: BackpressureStrategy,
     /// Enable priority scheduling (requires `priority-scheduling` feature).
     /// When enabled, uses PriorityJobQueue instead of the default queue.
     /// Default: false
@@ -44,7 +47,8 @@ impl std::fmt::Debug for ThreadPoolConfig {
             .field("max_queue_size", &self.max_queue_size)
             .field("thread_name_prefix", &self.thread_name_prefix)
             .field("poll_interval", &self.poll_interval)
-            .field("queue", &self.queue.as_ref().map(|_| "<custom queue>"));
+            .field("queue", &self.queue.as_ref().map(|_| "<custom queue>"))
+            .field("backpressure_strategy", &self.backpressure_strategy);
         #[cfg(feature = "priority-scheduling")]
         debug.field("enable_priority", &self.enable_priority);
         debug.finish()
@@ -61,6 +65,7 @@ impl Default for ThreadPoolConfig {
             thread_name_prefix: "worker".to_string(),
             poll_interval: Duration::from_millis(100),
             queue: None,
+            backpressure_strategy: BackpressureStrategy::default(),
             #[cfg(feature = "priority-scheduling")]
             enable_priority: false,
         }
@@ -116,6 +121,74 @@ impl ThreadPoolConfig {
         assert!(!interval.is_zero(), "poll interval must be non-zero");
         self.poll_interval = interval;
         self
+    }
+
+    /// Set the backpressure strategy for bounded queues.
+    ///
+    /// This controls how the pool handles job submissions when the queue is full.
+    ///
+    /// # Arguments
+    ///
+    /// * `strategy` - The backpressure strategy to use
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use rust_thread_system::prelude::*;
+    /// use rust_thread_system::queue::BackpressureStrategy;
+    /// use std::time::Duration;
+    ///
+    /// // Reject immediately for real-time systems
+    /// let config = ThreadPoolConfig::default()
+    ///     .with_max_queue_size(1000)
+    ///     .with_backpressure_strategy(BackpressureStrategy::RejectImmediately);
+    ///
+    /// // Timeout for web servers
+    /// let config = ThreadPoolConfig::default()
+    ///     .with_max_queue_size(5000)
+    ///     .with_backpressure_strategy(BackpressureStrategy::BlockWithTimeout(Duration::from_secs(5)));
+    /// ```
+    #[must_use = "builder methods return a new value and do not modify the original"]
+    pub fn with_backpressure_strategy(mut self, strategy: BackpressureStrategy) -> Self {
+        self.backpressure_strategy = strategy;
+        self
+    }
+
+    /// Configure the pool to reject jobs immediately when the queue is full.
+    ///
+    /// This is a convenience method equivalent to:
+    /// ```rust,ignore
+    /// config.with_backpressure_strategy(BackpressureStrategy::RejectImmediately)
+    /// ```
+    ///
+    /// # Use Cases
+    ///
+    /// - Real-time systems where waiting is not acceptable
+    /// - Systems that need immediate feedback on queue capacity
+    /// - Load shedding scenarios
+    #[must_use = "builder methods return a new value and do not modify the original"]
+    pub fn reject_when_full(self) -> Self {
+        self.with_backpressure_strategy(BackpressureStrategy::RejectImmediately)
+    }
+
+    /// Configure the pool to block with a timeout when the queue is full.
+    ///
+    /// This is a convenience method equivalent to:
+    /// ```rust,ignore
+    /// config.with_backpressure_strategy(BackpressureStrategy::BlockWithTimeout(timeout))
+    /// ```
+    ///
+    /// # Arguments
+    ///
+    /// * `timeout` - Maximum time to wait for queue space
+    ///
+    /// # Use Cases
+    ///
+    /// - Web servers with request timeouts
+    /// - Systems that can tolerate brief delays but need bounded latency
+    #[must_use = "builder methods return a new value and do not modify the original"]
+    pub fn block_with_timeout(self, timeout: Duration) -> Self {
+        self.with_backpressure_strategy(BackpressureStrategy::BlockWithTimeout(timeout))
     }
 
     /// Set a custom queue implementation.
@@ -357,7 +430,21 @@ impl ThreadPool {
     }
 
     /// Submit a job to the pool
+    ///
+    /// The submission behavior depends on the configured [`BackpressureStrategy`]:
+    ///
+    /// - [`Block`](BackpressureStrategy::Block): Wait indefinitely for queue space (default)
+    /// - [`BlockWithTimeout`](BackpressureStrategy::BlockWithTimeout): Wait up to the timeout
+    /// - [`RejectImmediately`](BackpressureStrategy::RejectImmediately): Return error if queue is full
+    /// - [`DropOldest`](BackpressureStrategy::DropOldest): Not supported by standard queue, falls back to block
+    /// - [`DropNewest`](BackpressureStrategy::DropNewest): Silently drop if queue is full
+    /// - [`Custom`](BackpressureStrategy::Custom): Delegate to custom handler
     pub fn submit<J: Job + 'static>(&self, job: J) -> Result<()> {
+        self.submit_with_backpressure(Box::new(job))
+    }
+
+    /// Internal method to submit a boxed job with backpressure handling
+    fn submit_with_backpressure(&self, job: crate::core::BoxedJob) -> Result<()> {
         if !self.running.load(Ordering::Acquire) {
             return Err(ThreadError::not_running(&self.config.thread_name_prefix));
         }
@@ -367,14 +454,100 @@ impl ThreadPool {
             .as_ref()
             .ok_or_else(|| ThreadError::not_running(&self.config.thread_name_prefix))?;
 
-        queue.send(Box::new(job)).map_err(|e| match e {
-            QueueError::Closed(_) => ThreadError::shutting_down(0),
-            QueueError::Full(_) => ThreadError::queue_full(queue.len(), self.config.max_queue_size),
-            _ => ThreadError::QueueSendError,
-        })?;
+        let result = match &self.config.backpressure_strategy {
+            BackpressureStrategy::Block => queue.send(job).map_err(|e| match e {
+                QueueError::Closed(_) => ThreadError::shutting_down(0),
+                QueueError::Full(_) => {
+                    ThreadError::queue_full(queue.len(), self.config.max_queue_size)
+                }
+                _ => ThreadError::QueueSendError,
+            }),
 
-        self.total_jobs_submitted.fetch_add(1, Ordering::Relaxed);
-        Ok(())
+            BackpressureStrategy::BlockWithTimeout(timeout) => {
+                queue.send_timeout(job, *timeout).map_err(|e| match e {
+                    QueueError::Timeout(_) => {
+                        ThreadError::submission_timeout(timeout.as_millis() as u64)
+                    }
+                    QueueError::Closed(_) => ThreadError::shutting_down(0),
+                    QueueError::Full(_) => {
+                        ThreadError::queue_full(queue.len(), self.config.max_queue_size)
+                    }
+                    _ => ThreadError::QueueSendError,
+                })
+            }
+
+            BackpressureStrategy::RejectImmediately => queue.try_send(job).map_err(|e| match e {
+                QueueError::Full(_) => {
+                    ThreadError::queue_full(queue.len(), self.config.max_queue_size)
+                }
+                QueueError::Closed(_) => ThreadError::shutting_down(0),
+                _ => ThreadError::QueueSendError,
+            }),
+
+            BackpressureStrategy::DropOldest => {
+                // DropOldest requires special queue support (deque-based)
+                // For now, fall back to Block behavior
+                // TODO: Implement DroppableQueue for full DropOldest support
+                queue.send(job).map_err(|e| match e {
+                    QueueError::Closed(_) => ThreadError::shutting_down(0),
+                    QueueError::Full(_) => {
+                        ThreadError::queue_full(queue.len(), self.config.max_queue_size)
+                    }
+                    _ => ThreadError::QueueSendError,
+                })
+            }
+
+            BackpressureStrategy::DropNewest => {
+                // Try to send, silently drop if queue is full
+                match queue.try_send(job) {
+                    Ok(()) => Ok(()),
+                    Err(QueueError::Full(_)) => {
+                        // Silently drop the job
+                        Ok(())
+                    }
+                    Err(QueueError::Closed(_)) => Err(ThreadError::shutting_down(0)),
+                    Err(_) => Err(ThreadError::QueueSendError),
+                }
+            }
+
+            BackpressureStrategy::Custom(handler) => {
+                // First try to send normally
+                match queue.try_send(job) {
+                    Ok(()) => Ok(()),
+                    Err(QueueError::Full(holder)) => {
+                        // Get the job back from the holder
+                        if let Some(job) = holder.take() {
+                            // Call the custom handler
+                            match handler.handle_backpressure(job) {
+                                Ok(Some(retry_job)) => {
+                                    // Handler wants to retry with (possibly modified) job
+                                    // Use blocking send for retry
+                                    queue.send(retry_job).map_err(|e| match e {
+                                        QueueError::Closed(_) => ThreadError::shutting_down(0),
+                                        _ => ThreadError::QueueSendError,
+                                    })
+                                }
+                                Ok(None) => {
+                                    // Handler chose to drop the job
+                                    Ok(())
+                                }
+                                Err(e) => Err(e),
+                            }
+                        } else {
+                            // Job holder was empty (shouldn't happen in normal operation)
+                            Err(ThreadError::QueueSendError)
+                        }
+                    }
+                    Err(QueueError::Closed(_)) => Err(ThreadError::shutting_down(0)),
+                    Err(_) => Err(ThreadError::QueueSendError),
+                }
+            }
+        };
+
+        if result.is_ok() {
+            self.total_jobs_submitted.fetch_add(1, Ordering::Relaxed);
+        }
+        result
     }
 
     /// Submit a job with a specific priority.
@@ -1414,5 +1587,236 @@ mod tests {
 
         let result = pool.execute_with_priority(|| Ok(()), Priority::High);
         assert!(matches!(result, Err(ThreadError::NotRunning { .. })));
+    }
+
+    // Backpressure strategy tests
+
+    #[test]
+    fn test_backpressure_block_default() {
+        // Default strategy is Block
+        let config = ThreadPoolConfig::new(2).with_max_queue_size(10);
+        assert!(matches!(
+            config.backpressure_strategy,
+            BackpressureStrategy::Block
+        ));
+    }
+
+    #[test]
+    fn test_backpressure_reject_immediately() {
+        // Use a very small queue to easily fill it
+        let config = ThreadPoolConfig::new(1)
+            .with_max_queue_size(1)
+            .reject_when_full();
+        let pool = ThreadPool::with_config(config).expect("Failed to create thread pool");
+        pool.start().expect("Failed to start pool");
+
+        // Use a channel to signal when the first job starts executing
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+
+        // Submit a job that blocks the worker
+        pool.execute(move || {
+            started_tx.send(()).unwrap();
+            let _ = done_rx.recv();
+            Ok(())
+        })
+        .expect("Failed to submit first job");
+
+        // Wait for the worker to pick up the first job
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("First job should start within 5 seconds");
+
+        // Fill the queue (size 1)
+        pool.execute(|| Ok(())).expect("Failed to fill queue");
+
+        // This should fail immediately with QueueFull
+        let result = pool.execute(|| Ok(()));
+        assert!(
+            matches!(result, Err(ThreadError::QueueFull { .. })),
+            "Expected QueueFull error, got: {:?}",
+            result
+        );
+
+        // Release the blocking job
+        let _ = done_tx.send(());
+        pool.shutdown().expect("Failed to shutdown pool");
+    }
+
+    #[test]
+    fn test_backpressure_block_with_timeout() {
+        let config = ThreadPoolConfig::new(1)
+            .with_max_queue_size(1)
+            .block_with_timeout(Duration::from_millis(50));
+        let pool = ThreadPool::with_config(config).expect("Failed to create thread pool");
+        pool.start().expect("Failed to start pool");
+
+        // Use a channel to signal when the first job starts executing
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+
+        // Submit a job that blocks the worker
+        pool.execute(move || {
+            started_tx.send(()).unwrap();
+            let _ = done_rx.recv();
+            Ok(())
+        })
+        .expect("Failed to submit first job");
+
+        // Wait for the worker to pick up the first job
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("First job should start within 5 seconds");
+
+        // Fill the queue (size 1)
+        pool.execute(|| Ok(())).expect("Failed to fill queue");
+
+        // This should timeout
+        let start = std::time::Instant::now();
+        let result = pool.execute(|| Ok(()));
+        let elapsed = start.elapsed();
+
+        assert!(
+            matches!(result, Err(ThreadError::SubmissionTimeout { .. })),
+            "Expected SubmissionTimeout error, got: {:?}",
+            result
+        );
+        assert!(
+            elapsed >= Duration::from_millis(40),
+            "Should have waited at least 40ms, but only waited {:?}",
+            elapsed
+        );
+
+        // Release the blocking job
+        let _ = done_tx.send(());
+        pool.shutdown().expect("Failed to shutdown pool");
+    }
+
+    #[test]
+    fn test_backpressure_drop_newest() {
+        let config = ThreadPoolConfig::new(1)
+            .with_max_queue_size(1)
+            .with_backpressure_strategy(BackpressureStrategy::DropNewest);
+        let pool = ThreadPool::with_config(config).expect("Failed to create thread pool");
+        pool.start().expect("Failed to start pool");
+
+        // Use a channel to signal when the first job starts executing
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+
+        // Submit a job that blocks the worker
+        pool.execute(move || {
+            started_tx.send(()).unwrap();
+            let _ = done_rx.recv();
+            Ok(())
+        })
+        .expect("Failed to submit first job");
+
+        // Wait for the worker to pick up the first job
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("First job should start within 5 seconds");
+
+        // Fill the queue (size 1)
+        pool.execute(|| Ok(())).expect("Failed to fill queue");
+
+        // This should succeed (job is silently dropped)
+        let result = pool.execute(|| Ok(()));
+        assert!(result.is_ok(), "DropNewest should not return error");
+
+        // Release the blocking job
+        let _ = done_tx.send(());
+        pool.shutdown().expect("Failed to shutdown pool");
+    }
+
+    #[test]
+    fn test_backpressure_custom_handler() {
+        use crate::queue::BackpressureHandler;
+        use std::sync::atomic::AtomicBool;
+
+        struct TestHandler {
+            was_called: Arc<AtomicBool>,
+        }
+
+        impl BackpressureHandler for TestHandler {
+            fn handle_backpressure(
+                &self,
+                _job: crate::core::BoxedJob,
+            ) -> crate::core::Result<Option<crate::core::BoxedJob>> {
+                self.was_called.store(true, Ordering::SeqCst);
+                Ok(None) // Drop the job
+            }
+        }
+
+        let was_called = Arc::new(AtomicBool::new(false));
+        let handler = Arc::new(TestHandler {
+            was_called: Arc::clone(&was_called),
+        });
+
+        let config = ThreadPoolConfig::new(1)
+            .with_max_queue_size(1)
+            .with_backpressure_strategy(BackpressureStrategy::Custom(handler));
+        let pool = ThreadPool::with_config(config).expect("Failed to create thread pool");
+        pool.start().expect("Failed to start pool");
+
+        // Use a channel to signal when the first job starts executing
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+
+        // Submit a job that blocks the worker
+        pool.execute(move || {
+            started_tx.send(()).unwrap();
+            let _ = done_rx.recv();
+            Ok(())
+        })
+        .expect("Failed to submit first job");
+
+        // Wait for the worker to pick up the first job
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("First job should start within 5 seconds");
+
+        // Fill the queue (size 1)
+        pool.execute(|| Ok(())).expect("Failed to fill queue");
+
+        // This should trigger the custom handler
+        let result = pool.execute(|| Ok(()));
+        assert!(result.is_ok(), "Custom handler returned Ok(None)");
+        assert!(
+            was_called.load(Ordering::SeqCst),
+            "Custom handler should have been called"
+        );
+
+        // Release the blocking job
+        let _ = done_tx.send(());
+        pool.shutdown().expect("Failed to shutdown pool");
+    }
+
+    #[test]
+    fn test_backpressure_config_convenience_methods() {
+        // Test reject_when_full
+        let config = ThreadPoolConfig::new(2).reject_when_full();
+        assert!(matches!(
+            config.backpressure_strategy,
+            BackpressureStrategy::RejectImmediately
+        ));
+
+        // Test block_with_timeout
+        let timeout = Duration::from_secs(5);
+        let config = ThreadPoolConfig::new(2).block_with_timeout(timeout);
+        match config.backpressure_strategy {
+            BackpressureStrategy::BlockWithTimeout(t) => {
+                assert_eq!(t, timeout);
+            }
+            _ => panic!("Expected BlockWithTimeout"),
+        }
+
+        // Test with_backpressure_strategy
+        let config =
+            ThreadPoolConfig::new(2).with_backpressure_strategy(BackpressureStrategy::DropNewest);
+        assert!(matches!(
+            config.backpressure_strategy,
+            BackpressureStrategy::DropNewest
+        ));
     }
 }
