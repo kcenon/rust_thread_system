@@ -249,6 +249,55 @@ let pool = ThreadPool::with_config(config)?;
 | `adaptive()` | `AdaptiveQueue` |
 | `with_priority()` | `PriorityJobQueue` |
 
+### 큐 기능 인트로스펙션
+
+런타임에 큐 기능을 조회하여 동작을 조정하거나 요구 사항을 검증할 수 있습니다:
+
+```rust
+use rust_thread_system::prelude::*;
+
+let pool = ThreadPool::with_threads(4)?;
+pool.start()?;
+
+// 큐 기능 가져오기
+if let Some(caps) = pool.queue_capabilities() {
+    println!("큐: {}", caps.describe());
+    // 출력: "crossbeam::channel::unbounded: [unbounded, lock-free, mpmc]"
+
+    if caps.is_lock_free {
+        println!("최적 성능을 위해 lock-free 큐를 사용 중");
+    }
+}
+
+// 특정 기능 확인
+if pool.supports_capabilities(CapabilityFlags::LOCK_FREE | CapabilityFlags::MPMC) {
+    println!("큐가 높은 경쟁 MPMC 시나리오에 적합합니다");
+}
+
+// 큐가 요구 사항을 충족하는지 검증
+let queue = ChannelQueue::unbounded();
+match require_capabilities(&queue, CapabilityFlags::PRIORITY) {
+    Ok(()) => println!("큐가 우선순위를 지원합니다"),
+    Err(e) => println!("{}", e), // "queue 'crossbeam::channel::unbounded' is missing required capabilities: [priority]"
+}
+```
+
+사용 가능한 기능 플래그:
+
+| 플래그 | 설명 |
+|--------|------|
+| `BOUNDED` | 큐에 최대 용량이 있음 |
+| `UNBOUNDED` | 용량 제한이 없음 |
+| `LOCK_FREE` | Lock-free 알고리즘 사용 |
+| `WAIT_FREE` | Lock-free보다 강한 보장 |
+| `PRIORITY` | 우선순위 정렬 지원 |
+| `EXACT_SIZE` | `len()`이 정확한 개수 반환 |
+| `MPMC` | 다중 생산자 다중 소비자 |
+| `SPSC` | 단일 생산자 단일 소비자 |
+| `BLOCKING` | 블로킹 작업 지원 |
+| `TIMEOUT` | 타임아웃 작업 지원 |
+| `ADAPTIVE` | 적응형 전략 사용 |
+
 ### 워커 통계
 
 ```rust
