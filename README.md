@@ -14,6 +14,7 @@ A production-ready, high-performance Rust threading framework with worker pools 
 ## Features
 
 - **Thread Pool Management**: Efficient worker pool with configurable thread count
+- **Typed Thread Pool**: Route jobs to dedicated queues based on job type for QoS guarantees
 - **Flexible Job Queues**: Support for both bounded and unbounded job queues
 - **Pluggable Queue Implementations**: Custom queues via `JobQueue` trait
 - **Priority Scheduling**: Optional priority-based job execution (feature-gated)
@@ -63,9 +64,11 @@ fn main() -> Result<()> {
 
 - **Job Trait**: Define units of work to be executed
 - **ThreadPool**: Manages worker threads and job distribution
+- **TypedThreadPool**: Routes jobs to per-type queues for QoS guarantees
 - **Worker**: Individual worker threads that process jobs
 - **WorkerStats**: Per-worker statistics and metrics
 - **JobQueue Trait**: Abstraction for pluggable queue implementations
+- **JobType Trait**: Define job type categories for typed routing
 
 ### Design Principles
 
@@ -276,6 +279,99 @@ Priority levels (highest to lowest):
 
 Within the same priority level, jobs are processed in FIFO order.
 
+### Typed Thread Pool
+
+For applications that need per-type QoS guarantees, use `TypedThreadPool`:
+
+```rust
+use rust_thread_system::prelude::*;
+
+fn main() -> Result<()> {
+    // Create a typed pool with per-type worker configuration
+    let config = TypedPoolConfig::<DefaultJobType>::new()
+        .workers_for(DefaultJobType::Critical, 4)   // Dedicated critical workers
+        .workers_for(DefaultJobType::Compute, 8)    // CPU-bound work
+        .workers_for(DefaultJobType::Io, 16)        // IO-bound work (high concurrency)
+        .workers_for(DefaultJobType::Background, 2) // Low priority tasks
+        .type_priority(vec![
+            DefaultJobType::Critical,   // Processed first
+            DefaultJobType::Io,
+            DefaultJobType::Compute,
+            DefaultJobType::Background, // Processed last
+        ]);
+
+    let pool = TypedThreadPool::new(config)?;
+    pool.start()?;
+
+    // Jobs are routed to dedicated queues based on type
+    pool.execute_typed(DefaultJobType::Critical, || {
+        println!("Critical task - has dedicated workers");
+        Ok(())
+    })?;
+
+    pool.execute_typed(DefaultJobType::Io, || {
+        println!("IO task - high concurrency");
+        Ok(())
+    })?;
+
+    pool.execute_typed(DefaultJobType::Background, || {
+        println!("Background task - processed when others are idle");
+        Ok(())
+    })?;
+
+    // Get per-type statistics
+    let stats = pool.type_stats(DefaultJobType::Io).unwrap();
+    println!("IO jobs: submitted={}, completed={}, avg_latency={:?}",
+        stats.jobs_submitted, stats.jobs_completed, stats.avg_latency);
+
+    pool.shutdown()?;
+    Ok(())
+}
+```
+
+Use presets for common workload patterns:
+
+```rust
+// For IO-heavy workloads (databases, network services)
+let config = TypedPoolConfig::<DefaultJobType>::io_optimized();
+
+// For CPU-heavy workloads (data processing, computation)
+let config = TypedPoolConfig::<DefaultJobType>::compute_optimized();
+
+// For mixed workloads
+let config = TypedPoolConfig::<DefaultJobType>::balanced();
+```
+
+Define custom job types for domain-specific categorization:
+
+```rust
+use rust_thread_system::typed::JobType;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum GameJobType {
+    Physics,
+    Rendering,
+    Audio,
+    Network,
+    AI,
+}
+
+impl JobType for GameJobType {
+    fn all_variants() -> &'static [Self] {
+        &[Self::Physics, Self::Rendering, Self::Audio, Self::Network, Self::AI]
+    }
+
+    fn default_type() -> Self {
+        Self::Physics
+    }
+}
+
+// Use with TypedThreadPool
+let config = TypedPoolConfig::<GameJobType>::new()
+    .workers_for(GameJobType::Physics, 2)
+    .workers_for(GameJobType::Rendering, 4);
+```
+
 ### Worker Statistics
 
 ```rust
@@ -307,6 +403,8 @@ The `examples/` directory contains several complete examples:
 - **basic_usage.rs**: Simple thread pool usage with closures
 - **custom_jobs.rs**: Implementing custom job types
 - **bounded_queue.rs**: Using bounded queues to limit memory usage
+- **typed_pool.rs**: Using typed thread pool with per-type routing
+- **custom_job_type.rs**: Defining custom job types for domain-specific categorization
 
 Run an example:
 
@@ -314,6 +412,8 @@ Run an example:
 cargo run --example basic_usage
 cargo run --example custom_jobs
 cargo run --example bounded_queue
+cargo run --example typed_pool
+cargo run --example custom_job_type
 ```
 
 ## Performance Characteristics
