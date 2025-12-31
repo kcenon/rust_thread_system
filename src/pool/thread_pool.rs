@@ -1,8 +1,12 @@
 //! Thread pool implementation
 
 use crate::core::{CancellationToken, ClosureJob, Job, JobHandle, Result, ThreadError};
+#[cfg(feature = "priority-scheduling")]
+use crate::core::Priority;
 use crate::pool::worker::{Worker, WorkerStats};
 use crate::queue::{BoundedQueue, ChannelQueue, JobQueue, QueueError};
+#[cfg(feature = "priority-scheduling")]
+use crate::queue::PriorityJobQueue;
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -25,17 +29,25 @@ pub struct ThreadPoolConfig {
     pub poll_interval: Duration,
     /// Custom queue implementation (if None, uses default based on max_queue_size)
     queue: Option<Arc<dyn JobQueue>>,
+    /// Enable priority scheduling (requires `priority-scheduling` feature).
+    /// When enabled, uses PriorityJobQueue instead of the default queue.
+    /// Default: false
+    #[cfg(feature = "priority-scheduling")]
+    pub enable_priority: bool,
 }
 
 impl std::fmt::Debug for ThreadPoolConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ThreadPoolConfig")
+        let mut debug = f.debug_struct("ThreadPoolConfig");
+        debug
             .field("num_threads", &self.num_threads)
             .field("max_queue_size", &self.max_queue_size)
             .field("thread_name_prefix", &self.thread_name_prefix)
             .field("poll_interval", &self.poll_interval)
-            .field("queue", &self.queue.as_ref().map(|_| "<custom queue>"))
-            .finish()
+            .field("queue", &self.queue.as_ref().map(|_| "<custom queue>"));
+        #[cfg(feature = "priority-scheduling")]
+        debug.field("enable_priority", &self.enable_priority);
+        debug.finish()
     }
 }
 
@@ -49,6 +61,8 @@ impl Default for ThreadPoolConfig {
             thread_name_prefix: "worker".to_string(),
             poll_interval: Duration::from_millis(100),
             queue: None,
+            #[cfg(feature = "priority-scheduling")]
+            enable_priority: false,
         }
     }
 }
@@ -123,6 +137,41 @@ impl ThreadPoolConfig {
     #[must_use = "builder methods return a new value and do not modify the original"]
     pub fn with_queue(mut self, queue: Arc<dyn JobQueue>) -> Self {
         self.queue = Some(queue);
+        self
+    }
+
+    /// Enable priority scheduling.
+    ///
+    /// When enabled, the pool uses a priority-based queue that processes
+    /// higher priority jobs first. Jobs can be submitted with specific priorities
+    /// using [`ThreadPool::submit_with_priority()`] or [`ThreadPool::execute_with_priority()`].
+    ///
+    /// Jobs submitted via regular [`ThreadPool::submit()`] will use `Priority::Normal`.
+    ///
+    /// # Note
+    ///
+    /// When `enable_priority` is true, `max_queue_size` is ignored as
+    /// `PriorityJobQueue` is unbounded.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use rust_thread_system::prelude::*;
+    ///
+    /// let config = ThreadPoolConfig::new(4).enable_priority(true);
+    /// let pool = ThreadPool::with_config(config)?;
+    /// pool.start()?;
+    ///
+    /// // Submit with priority
+    /// pool.execute_with_priority(|| {
+    ///     println!("Critical task");
+    ///     Ok(())
+    /// }, Priority::Critical)?;
+    /// ```
+    #[cfg(feature = "priority-scheduling")]
+    #[must_use = "builder methods return a new value and do not modify the original"]
+    pub fn enable_priority(mut self, enable: bool) -> Self {
+        self.enable_priority = enable;
         self
     }
 
@@ -274,6 +323,15 @@ impl ThreadPool {
         let queue: Arc<dyn JobQueue> = match &self.config.queue {
             Some(q) => Arc::clone(q),
             None => {
+                #[cfg(feature = "priority-scheduling")]
+                if self.config.enable_priority {
+                    Arc::new(PriorityJobQueue::new())
+                } else if self.config.max_queue_size > 0 {
+                    Arc::new(BoundedQueue::new(self.config.max_queue_size))
+                } else {
+                    Arc::new(ChannelQueue::unbounded())
+                }
+                #[cfg(not(feature = "priority-scheduling"))]
                 if self.config.max_queue_size > 0 {
                     Arc::new(BoundedQueue::new(self.config.max_queue_size))
                 } else {
@@ -322,12 +380,99 @@ impl ThreadPool {
         Ok(())
     }
 
+    /// Submit a job with a specific priority.
+    ///
+    /// Jobs with higher priority are processed before jobs with lower priority.
+    /// Within the same priority level, jobs are processed in FIFO order.
+    ///
+    /// If the pool was not configured with `enable_priority(true)` or a custom
+    /// priority queue, the priority is ignored and the job is submitted normally.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use rust_thread_system::prelude::*;
+    ///
+    /// let config = ThreadPoolConfig::new(4).enable_priority(true);
+    /// let pool = ThreadPool::with_config(config)?;
+    /// pool.start()?;
+    ///
+    /// // Critical job will be processed first
+    /// pool.submit_with_priority(my_critical_job, Priority::Critical)?;
+    /// pool.submit_with_priority(my_background_job, Priority::Low)?;
+    /// ```
+    #[cfg(feature = "priority-scheduling")]
+    pub fn submit_with_priority<J: Job + 'static>(
+        &self,
+        job: J,
+        priority: Priority,
+    ) -> Result<()> {
+        if !self.running.load(Ordering::Acquire) {
+            return Err(ThreadError::not_running(&self.config.thread_name_prefix));
+        }
+
+        let queue_guard = self.queue.read();
+        let queue = queue_guard
+            .as_ref()
+            .ok_or_else(|| ThreadError::not_running(&self.config.thread_name_prefix))?;
+
+        queue
+            .send_with_priority(Box::new(job), priority)
+            .map_err(|e| match e {
+                QueueError::Closed(_) => ThreadError::shutting_down(0),
+                QueueError::Full(_) => {
+                    ThreadError::queue_full(queue.len(), self.config.max_queue_size)
+                }
+                _ => ThreadError::QueueSendError,
+            })?;
+
+        self.total_jobs_submitted.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
     /// Submit a closure as a job
     pub fn execute<F>(&self, f: F) -> Result<()>
     where
         F: FnOnce() -> Result<()> + Send + 'static,
     {
         self.submit(ClosureJob::new(f))
+    }
+
+    /// Execute a closure with a specific priority.
+    ///
+    /// Jobs with higher priority are processed before jobs with lower priority.
+    /// Within the same priority level, jobs are processed in FIFO order.
+    ///
+    /// If the pool was not configured with `enable_priority(true)` or a custom
+    /// priority queue, the priority is ignored and the job is submitted normally.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use rust_thread_system::prelude::*;
+    ///
+    /// let config = ThreadPoolConfig::new(4).enable_priority(true);
+    /// let pool = ThreadPool::with_config(config)?;
+    /// pool.start()?;
+    ///
+    /// // Critical task will be processed first
+    /// pool.execute_with_priority(|| {
+    ///     println!("Critical work!");
+    ///     Ok(())
+    /// }, Priority::Critical)?;
+    ///
+    /// // Low priority background task
+    /// pool.execute_with_priority(|| {
+    ///     println!("Background work");
+    ///     Ok(())
+    /// }, Priority::Low)?;
+    /// ```
+    #[cfg(feature = "priority-scheduling")]
+    pub fn execute_with_priority<F>(&self, f: F, priority: Priority) -> Result<()>
+    where
+        F: FnOnce() -> Result<()> + Send + 'static,
+    {
+        self.submit_with_priority(ClosureJob::new(f), priority)
     }
 
     /// Submit a cancellable closure and get a handle to control it
@@ -1136,5 +1281,135 @@ mod tests {
         assert_eq!(counter.load(Ordering::Relaxed), 1);
 
         pool.shutdown().expect("Failed to shutdown pool");
+    }
+
+    #[cfg(feature = "priority-scheduling")]
+    #[test]
+    fn test_enable_priority_config() {
+        let config = ThreadPoolConfig::new(2).enable_priority(true);
+        assert!(config.enable_priority);
+
+        let pool = ThreadPool::with_config(config).expect("Failed to create thread pool");
+        pool.start().expect("Failed to start pool");
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = Arc::clone(&counter);
+
+        pool.execute(move || {
+            counter_clone.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        })
+        .expect("Failed to submit job");
+
+        thread::sleep(Duration::from_millis(100));
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
+
+        pool.shutdown().expect("Failed to shutdown pool");
+    }
+
+    #[cfg(feature = "priority-scheduling")]
+    #[test]
+    fn test_execute_with_priority() {
+        use crate::core::Priority;
+
+        let config = ThreadPoolConfig::new(2).enable_priority(true);
+        let pool = ThreadPool::with_config(config).expect("Failed to create thread pool");
+        pool.start().expect("Failed to start pool");
+
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        // Submit jobs with different priorities
+        for priority in [Priority::Low, Priority::Normal, Priority::High, Priority::Critical] {
+            let counter_clone = Arc::clone(&counter);
+            pool.execute_with_priority(
+                move || {
+                    counter_clone.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                },
+                priority,
+            )
+            .expect("Failed to submit job");
+        }
+
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(counter.load(Ordering::Relaxed), 4);
+
+        pool.shutdown().expect("Failed to shutdown pool");
+    }
+
+    #[cfg(feature = "priority-scheduling")]
+    #[test]
+    fn test_priority_ordering() {
+        use crate::core::Priority;
+        use std::sync::Mutex;
+
+        // Use single thread to enforce sequential processing
+        let config = ThreadPoolConfig::new(1).enable_priority(true);
+        let pool = ThreadPool::with_config(config).expect("Failed to create thread pool");
+
+        // Channel to signal when first job starts
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+
+        pool.start().expect("Failed to start pool");
+
+        // Submit a blocking job first to hold up the worker
+        pool.execute(move || {
+            started_tx.send(()).unwrap();
+            let _ = done_rx.recv();
+            Ok(())
+        })
+        .expect("Failed to submit blocking job");
+
+        // Wait for the blocking job to start
+        started_rx.recv_timeout(Duration::from_secs(5)).expect("Blocking job should start");
+
+        // Now submit jobs with different priorities - they'll queue up
+        let order = Arc::new(Mutex::new(Vec::new()));
+
+        for (idx, priority) in [
+            (0, Priority::Low),
+            (1, Priority::High),
+            (2, Priority::Normal),
+            (3, Priority::Critical),
+        ] {
+            let order_clone = Arc::clone(&order);
+            pool.execute_with_priority(
+                move || {
+                    order_clone.lock().unwrap().push((idx, priority));
+                    Ok(())
+                },
+                priority,
+            )
+            .expect("Failed to submit job");
+        }
+
+        // Release the blocking job
+        let _ = done_tx.send(());
+
+        // Wait for all jobs to complete
+        thread::sleep(Duration::from_millis(500));
+
+        let execution_order = order.lock().unwrap();
+        // Expected order: Critical (3), High (1), Normal (2), Low (0)
+        assert_eq!(execution_order.len(), 4);
+        assert_eq!(execution_order[0].1, Priority::Critical);
+        assert_eq!(execution_order[1].1, Priority::High);
+        assert_eq!(execution_order[2].1, Priority::Normal);
+        assert_eq!(execution_order[3].1, Priority::Low);
+
+        pool.shutdown().expect("Failed to shutdown pool");
+    }
+
+    #[cfg(feature = "priority-scheduling")]
+    #[test]
+    fn test_submit_with_priority_when_not_running() {
+        use crate::core::Priority;
+
+        let config = ThreadPoolConfig::new(2).enable_priority(true);
+        let pool = ThreadPool::with_config(config).expect("Failed to create thread pool");
+
+        let result = pool.execute_with_priority(|| Ok(()), Priority::High);
+        assert!(matches!(result, Err(ThreadError::NotRunning { .. })));
     }
 }

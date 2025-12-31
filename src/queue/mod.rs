@@ -35,6 +35,8 @@ pub use channel::ChannelQueue;
 #[cfg(feature = "priority-scheduling")]
 pub use priority::PriorityJobQueue;
 
+#[cfg(feature = "priority-scheduling")]
+use crate::core::Priority;
 use crate::core::BoxedJob;
 use std::time::Duration;
 
@@ -230,6 +232,60 @@ pub trait JobQueue: Send + Sync {
 
     /// Returns the capabilities of this queue implementation.
     fn capabilities(&self) -> QueueCapabilities;
+
+    /// Sends a job with a specific priority.
+    ///
+    /// For queues that support priority scheduling, this will enqueue the job
+    /// with the specified priority level. For queues that don't support priority,
+    /// this falls back to regular [`send()`](Self::send), ignoring the priority.
+    ///
+    /// # Errors
+    ///
+    /// - [`QueueError::Closed`] if the queue has been closed.
+    /// - [`QueueError::Full`] if the queue is bounded and at capacity.
+    #[cfg(feature = "priority-scheduling")]
+    fn send_with_priority(&self, job: BoxedJob, _priority: Priority) -> QueueResult<()> {
+        // Default implementation ignores priority
+        self.send(job)
+    }
+
+    /// Attempts to send a job with priority without blocking.
+    ///
+    /// For queues that support priority scheduling, this will try to enqueue the job
+    /// with the specified priority level. For queues that don't support priority,
+    /// this falls back to regular [`try_send()`](Self::try_send), ignoring the priority.
+    ///
+    /// # Errors
+    ///
+    /// - [`QueueError::Full`] if the queue is bounded and at capacity.
+    /// - [`QueueError::Closed`] if the queue has been closed.
+    #[cfg(feature = "priority-scheduling")]
+    fn try_send_with_priority(&self, job: BoxedJob, _priority: Priority) -> QueueResult<()> {
+        // Default implementation ignores priority
+        self.try_send(job)
+    }
+
+    /// Sends a job with priority, with a timeout.
+    ///
+    /// For queues that support priority scheduling, this will try to enqueue the job
+    /// with the specified priority level within the timeout. For queues that don't support
+    /// priority, this falls back to regular [`send_timeout()`](Self::send_timeout),
+    /// ignoring the priority.
+    ///
+    /// # Errors
+    ///
+    /// - [`QueueError::Timeout`] if the operation times out.
+    /// - [`QueueError::Closed`] if the queue has been closed.
+    #[cfg(feature = "priority-scheduling")]
+    fn send_with_priority_timeout(
+        &self,
+        job: BoxedJob,
+        _priority: Priority,
+        timeout: Duration,
+    ) -> QueueResult<()> {
+        // Default implementation ignores priority
+        self.send_timeout(job, timeout)
+    }
 }
 
 #[cfg(test)]

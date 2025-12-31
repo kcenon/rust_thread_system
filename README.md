@@ -229,6 +229,53 @@ Available queue implementations:
 | `BoundedQueue` | Bounded FIFO with capacity limit | Memory-constrained environments |
 | `PriorityJobQueue` | Priority-based ordering | Task prioritization (feature-gated) |
 
+### Priority Scheduling
+
+Enable the `priority-scheduling` feature to use priority-based job execution:
+
+```toml
+[dependencies]
+rust_thread_system = { version = "0.1.0", features = ["priority-scheduling"] }
+```
+
+Use `enable_priority(true)` to automatically create a priority queue:
+
+```rust
+use rust_thread_system::prelude::*;
+
+let config = ThreadPoolConfig::new(4).enable_priority(true);
+let pool = ThreadPool::with_config(config)?;
+pool.start()?;
+
+// Submit jobs with different priorities
+// Critical jobs are processed before High, High before Normal, Normal before Low
+pool.execute_with_priority(|| {
+    println!("Critical task - processed first");
+    Ok(())
+}, Priority::Critical)?;
+
+pool.execute_with_priority(|| {
+    println!("Background task - processed last");
+    Ok(())
+}, Priority::Low)?;
+
+// Regular execute() uses Normal priority
+pool.execute(|| {
+    println!("Normal priority task");
+    Ok(())
+})?;
+
+pool.shutdown()?;
+```
+
+Priority levels (highest to lowest):
+- `Priority::Critical` - Must be executed ASAP
+- `Priority::High` - Important tasks
+- `Priority::Normal` - Default for most tasks
+- `Priority::Low` - Background tasks
+
+Within the same priority level, jobs are processed in FIFO order.
+
 ### Worker Statistics
 
 ```rust
