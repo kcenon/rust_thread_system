@@ -10,6 +10,26 @@
 //! - [`AdaptiveQueue`]: Auto-optimizing queue that switches between mutex and lock-free
 //! - [`PriorityJobQueue`]: Priority-based queue (requires `priority-scheduling` feature)
 //!
+//! # Queue Capability Introspection
+//!
+//! All queues implement capability introspection via [`QueueCapabilities`], allowing
+//! runtime querying of queue characteristics:
+//!
+//! ```rust,ignore
+//! use rust_thread_system::queue::{ChannelQueue, JobQueue, CapabilityFlags};
+//!
+//! let queue = ChannelQueue::unbounded();
+//! let caps = queue.capabilities();
+//!
+//! println!("Queue: {}", caps.describe());
+//! // Output: "crossbeam::channel::unbounded: [unbounded, lock-free, mpmc]"
+//!
+//! // Check if queue supports required capabilities
+//! if queue.supports(CapabilityFlags::LOCK_FREE | CapabilityFlags::MPMC) {
+//!     println!("Queue meets requirements!");
+//! }
+//! ```
+//!
 //! # Custom Queues
 //!
 //! You can implement custom queues by implementing the [`JobQueue`] trait:
@@ -47,9 +67,77 @@ pub use priority::PriorityJobQueue;
 use crate::core::BoxedJob;
 #[cfg(feature = "priority-scheduling")]
 use crate::core::Priority;
+use bitflags::bitflags;
 use std::time::Duration;
 
+bitflags! {
+    /// Flags for specifying required queue capabilities.
+    ///
+    /// These flags can be combined to specify multiple requirements that a queue
+    /// must satisfy. Use with [`JobQueue::supports()`] or [`require_capabilities()`]
+    /// to check if a queue meets the requirements.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use rust_thread_system::queue::{CapabilityFlags, ChannelQueue, JobQueue};
+    ///
+    /// let queue = ChannelQueue::unbounded();
+    ///
+    /// // Check for multiple capabilities
+    /// let required = CapabilityFlags::LOCK_FREE | CapabilityFlags::MPMC;
+    /// if queue.supports(required) {
+    ///     println!("Queue meets all requirements");
+    /// }
+    /// ```
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct CapabilityFlags: u32 {
+        /// Require bounded queue (has maximum capacity)
+        const BOUNDED = 1 << 0;
+        /// Require unbounded queue (no maximum capacity)
+        const UNBOUNDED = 1 << 1;
+        /// Require lock-free operations
+        const LOCK_FREE = 1 << 2;
+        /// Require wait-free operations (stronger than lock-free)
+        const WAIT_FREE = 1 << 3;
+        /// Require priority scheduling support
+        const PRIORITY = 1 << 4;
+        /// Require exact size reporting
+        const EXACT_SIZE = 1 << 5;
+        /// Require MPMC (multi-producer multi-consumer) support
+        const MPMC = 1 << 6;
+        /// Require SPSC (single-producer single-consumer) optimization
+        const SPSC = 1 << 7;
+        /// Require blocking operations support
+        const BLOCKING = 1 << 8;
+        /// Require timeout operations support
+        const TIMEOUT = 1 << 9;
+        /// Require adaptive behavior
+        const ADAPTIVE = 1 << 10;
+    }
+}
+
 /// Capabilities of a queue implementation for runtime introspection.
+///
+/// This struct provides detailed information about a queue's characteristics,
+/// enabling code to adapt behavior based on queue capabilities at runtime.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use rust_thread_system::queue::{ChannelQueue, JobQueue};
+///
+/// let queue = ChannelQueue::unbounded();
+/// let caps = queue.capabilities();
+///
+/// // Check specific capabilities
+/// if caps.is_lock_free {
+///     println!("Using lock-free queue for high-contention scenario");
+/// }
+///
+/// // Get a human-readable description
+/// println!("Queue info: {}", caps.describe());
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QueueCapabilities {
     /// Whether the queue has a maximum capacity
@@ -58,10 +146,24 @@ pub struct QueueCapabilities {
     pub capacity: Option<usize>,
     /// Whether the queue uses lock-free algorithms
     pub is_lock_free: bool,
+    /// Whether operations are wait-free (stronger guarantee than lock-free)
+    pub is_wait_free: bool,
     /// Whether the queue supports priority ordering
     pub supports_priority: bool,
     /// Whether `len()` returns an exact count (vs approximate)
     pub exact_size: bool,
+    /// Whether the queue supports MPMC (multi-producer multi-consumer)
+    pub mpmc: bool,
+    /// Whether the queue is optimized for SPSC (single-producer single-consumer)
+    pub spsc: bool,
+    /// Whether the queue supports blocking operations
+    pub supports_blocking: bool,
+    /// Whether the queue supports timeout operations
+    pub supports_timeout: bool,
+    /// Whether the queue uses adaptive strategies
+    pub is_adaptive: bool,
+    /// Queue implementation name for debugging/logging
+    pub implementation_name: &'static str,
 }
 
 impl Default for QueueCapabilities {
@@ -70,11 +172,291 @@ impl Default for QueueCapabilities {
             is_bounded: false,
             capacity: None,
             is_lock_free: true,
+            is_wait_free: false,
             supports_priority: false,
             exact_size: false,
+            mpmc: true,
+            spsc: false,
+            supports_blocking: true,
+            supports_timeout: true,
+            is_adaptive: false,
+            implementation_name: "unknown",
         }
     }
 }
+
+impl QueueCapabilities {
+    /// Creates capabilities for a standard unbounded channel queue.
+    pub fn unbounded_channel() -> Self {
+        Self {
+            is_bounded: false,
+            capacity: None,
+            is_lock_free: true,
+            is_wait_free: false,
+            supports_priority: false,
+            exact_size: false,
+            mpmc: true,
+            spsc: false,
+            supports_blocking: true,
+            supports_timeout: true,
+            is_adaptive: false,
+            implementation_name: "crossbeam::channel::unbounded",
+        }
+    }
+
+    /// Creates capabilities for a bounded channel queue.
+    pub fn bounded_channel(capacity: usize) -> Self {
+        Self {
+            is_bounded: true,
+            capacity: Some(capacity),
+            is_lock_free: true,
+            is_wait_free: false,
+            supports_priority: false,
+            exact_size: false,
+            mpmc: true,
+            spsc: false,
+            supports_blocking: true,
+            supports_timeout: true,
+            is_adaptive: false,
+            implementation_name: "crossbeam::channel::bounded",
+        }
+    }
+
+    /// Creates capabilities for a priority queue.
+    pub fn priority_queue(capacity: Option<usize>) -> Self {
+        Self {
+            is_bounded: capacity.is_some(),
+            capacity,
+            is_lock_free: false,
+            is_wait_free: false,
+            supports_priority: true,
+            exact_size: true,
+            mpmc: true,
+            spsc: false,
+            supports_blocking: true,
+            supports_timeout: true,
+            is_adaptive: false,
+            implementation_name: "PriorityJobQueue",
+        }
+    }
+
+    /// Creates capabilities for an adaptive queue.
+    pub fn adaptive() -> Self {
+        Self {
+            is_bounded: false,
+            capacity: None,
+            is_lock_free: false, // depends on current strategy
+            is_wait_free: false,
+            supports_priority: false,
+            exact_size: false,
+            mpmc: true,
+            spsc: false,
+            supports_blocking: true,
+            supports_timeout: true,
+            is_adaptive: true,
+            implementation_name: "AdaptiveQueue",
+        }
+    }
+
+    /// Returns a human-readable description of the queue capabilities.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use rust_thread_system::queue::{ChannelQueue, JobQueue};
+    ///
+    /// let queue = ChannelQueue::unbounded();
+    /// println!("{}", queue.capabilities().describe());
+    /// // Output: "crossbeam::channel::unbounded: [unbounded, lock-free, mpmc]"
+    /// ```
+    pub fn describe(&self) -> String {
+        let mut features = Vec::new();
+
+        if self.is_bounded {
+            if let Some(cap) = self.capacity {
+                features.push(format!("bounded({})", cap));
+            } else {
+                features.push("bounded".to_string());
+            }
+        } else {
+            features.push("unbounded".to_string());
+        }
+
+        if self.is_wait_free {
+            features.push("wait-free".to_string());
+        } else if self.is_lock_free {
+            features.push("lock-free".to_string());
+        }
+
+        if self.supports_priority {
+            features.push("priority".to_string());
+        }
+
+        if self.is_adaptive {
+            features.push("adaptive".to_string());
+        }
+
+        if self.mpmc {
+            features.push("mpmc".to_string());
+        } else if self.spsc {
+            features.push("spsc".to_string());
+        }
+
+        if self.exact_size {
+            features.push("exact-size".to_string());
+        }
+
+        format!("{}: [{}]", self.implementation_name, features.join(", "))
+    }
+
+    /// Checks if these capabilities satisfy the given flags.
+    ///
+    /// Returns `true` if all required capabilities are present.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use rust_thread_system::queue::{QueueCapabilities, CapabilityFlags};
+    ///
+    /// let caps = QueueCapabilities::unbounded_channel();
+    ///
+    /// // Check single requirement
+    /// assert!(caps.satisfies(CapabilityFlags::LOCK_FREE));
+    ///
+    /// // Check multiple requirements
+    /// assert!(caps.satisfies(CapabilityFlags::LOCK_FREE | CapabilityFlags::MPMC));
+    ///
+    /// // This will fail because unbounded channels are not bounded
+    /// assert!(!caps.satisfies(CapabilityFlags::BOUNDED));
+    /// ```
+    pub fn satisfies(&self, flags: CapabilityFlags) -> bool {
+        if flags.contains(CapabilityFlags::BOUNDED) && !self.is_bounded {
+            return false;
+        }
+        if flags.contains(CapabilityFlags::UNBOUNDED) && self.is_bounded {
+            return false;
+        }
+        if flags.contains(CapabilityFlags::LOCK_FREE) && !self.is_lock_free {
+            return false;
+        }
+        if flags.contains(CapabilityFlags::WAIT_FREE) && !self.is_wait_free {
+            return false;
+        }
+        if flags.contains(CapabilityFlags::PRIORITY) && !self.supports_priority {
+            return false;
+        }
+        if flags.contains(CapabilityFlags::EXACT_SIZE) && !self.exact_size {
+            return false;
+        }
+        if flags.contains(CapabilityFlags::MPMC) && !self.mpmc {
+            return false;
+        }
+        if flags.contains(CapabilityFlags::SPSC) && !self.spsc {
+            return false;
+        }
+        if flags.contains(CapabilityFlags::BLOCKING) && !self.supports_blocking {
+            return false;
+        }
+        if flags.contains(CapabilityFlags::TIMEOUT) && !self.supports_timeout {
+            return false;
+        }
+        if flags.contains(CapabilityFlags::ADAPTIVE) && !self.is_adaptive {
+            return false;
+        }
+        true
+    }
+}
+
+/// Checks if a queue supports the required capabilities.
+///
+/// Returns `Ok(())` if the queue satisfies all requirements, or an error
+/// describing which capabilities are missing.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use rust_thread_system::queue::{require_capabilities, ChannelQueue, JobQueue, CapabilityFlags};
+///
+/// let queue = ChannelQueue::unbounded();
+///
+/// // This will succeed
+/// require_capabilities(&queue, CapabilityFlags::LOCK_FREE)?;
+///
+/// // This will fail with an error
+/// require_capabilities(&queue, CapabilityFlags::PRIORITY)?;
+/// ```
+pub fn require_capabilities(
+    queue: &dyn JobQueue,
+    flags: CapabilityFlags,
+) -> Result<(), MissingCapabilitiesError> {
+    let caps = queue.capabilities();
+    if caps.satisfies(flags) {
+        Ok(())
+    } else {
+        Err(MissingCapabilitiesError {
+            required: flags,
+            actual: caps,
+        })
+    }
+}
+
+/// Error returned when a queue does not support required capabilities.
+#[derive(Debug, Clone)]
+pub struct MissingCapabilitiesError {
+    /// The capabilities that were required
+    pub required: CapabilityFlags,
+    /// The actual capabilities of the queue
+    pub actual: QueueCapabilities,
+}
+
+impl std::fmt::Display for MissingCapabilitiesError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut missing = Vec::new();
+
+        if self.required.contains(CapabilityFlags::BOUNDED) && !self.actual.is_bounded {
+            missing.push("bounded");
+        }
+        if self.required.contains(CapabilityFlags::UNBOUNDED) && self.actual.is_bounded {
+            missing.push("unbounded");
+        }
+        if self.required.contains(CapabilityFlags::LOCK_FREE) && !self.actual.is_lock_free {
+            missing.push("lock-free");
+        }
+        if self.required.contains(CapabilityFlags::WAIT_FREE) && !self.actual.is_wait_free {
+            missing.push("wait-free");
+        }
+        if self.required.contains(CapabilityFlags::PRIORITY) && !self.actual.supports_priority {
+            missing.push("priority");
+        }
+        if self.required.contains(CapabilityFlags::EXACT_SIZE) && !self.actual.exact_size {
+            missing.push("exact-size");
+        }
+        if self.required.contains(CapabilityFlags::MPMC) && !self.actual.mpmc {
+            missing.push("mpmc");
+        }
+        if self.required.contains(CapabilityFlags::SPSC) && !self.actual.spsc {
+            missing.push("spsc");
+        }
+        if self.required.contains(CapabilityFlags::BLOCKING) && !self.actual.supports_blocking {
+            missing.push("blocking");
+        }
+        if self.required.contains(CapabilityFlags::TIMEOUT) && !self.actual.supports_timeout {
+            missing.push("timeout");
+        }
+        if self.required.contains(CapabilityFlags::ADAPTIVE) && !self.actual.is_adaptive {
+            missing.push("adaptive");
+        }
+
+        write!(
+            f,
+            "queue '{}' is missing required capabilities: [{}]",
+            self.actual.implementation_name,
+            missing.join(", ")
+        )
+    }
+}
+
+impl std::error::Error for MissingCapabilitiesError {}
 
 /// Errors that can occur during queue operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -242,6 +624,26 @@ pub trait JobQueue: Send + Sync {
     /// Returns the capabilities of this queue implementation.
     fn capabilities(&self) -> QueueCapabilities;
 
+    /// Checks if this queue supports the required capabilities.
+    ///
+    /// This is a convenience method that combines [`capabilities()`](Self::capabilities)
+    /// with [`QueueCapabilities::satisfies()`].
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use rust_thread_system::queue::{ChannelQueue, JobQueue, CapabilityFlags};
+    ///
+    /// let queue = ChannelQueue::unbounded();
+    ///
+    /// if queue.supports(CapabilityFlags::LOCK_FREE | CapabilityFlags::MPMC) {
+    ///     println!("Queue is suitable for high-contention MPMC scenario");
+    /// }
+    /// ```
+    fn supports(&self, flags: CapabilityFlags) -> bool {
+        self.capabilities().satisfies(flags)
+    }
+
     /// Sends a job with a specific priority.
     ///
     /// For queues that support priority scheduling, this will enqueue the job
@@ -307,8 +709,185 @@ mod tests {
         assert!(!caps.is_bounded);
         assert!(caps.capacity.is_none());
         assert!(caps.is_lock_free);
+        assert!(!caps.is_wait_free);
         assert!(!caps.supports_priority);
         assert!(!caps.exact_size);
+        assert!(caps.mpmc);
+        assert!(!caps.spsc);
+        assert!(caps.supports_blocking);
+        assert!(caps.supports_timeout);
+        assert!(!caps.is_adaptive);
+        assert_eq!(caps.implementation_name, "unknown");
+    }
+
+    #[test]
+    fn test_queue_capabilities_unbounded_channel() {
+        let caps = QueueCapabilities::unbounded_channel();
+        assert!(!caps.is_bounded);
+        assert!(caps.capacity.is_none());
+        assert!(caps.is_lock_free);
+        assert!(!caps.is_wait_free);
+        assert!(!caps.supports_priority);
+        assert!(!caps.exact_size);
+        assert!(caps.mpmc);
+        assert!(!caps.spsc);
+        assert!(caps.supports_blocking);
+        assert!(caps.supports_timeout);
+        assert!(!caps.is_adaptive);
+        assert_eq!(caps.implementation_name, "crossbeam::channel::unbounded");
+    }
+
+    #[test]
+    fn test_queue_capabilities_bounded_channel() {
+        let caps = QueueCapabilities::bounded_channel(100);
+        assert!(caps.is_bounded);
+        assert_eq!(caps.capacity, Some(100));
+        assert!(caps.is_lock_free);
+        assert!(!caps.is_wait_free);
+        assert!(!caps.supports_priority);
+        assert!(!caps.exact_size);
+        assert!(caps.mpmc);
+        assert!(!caps.spsc);
+        assert!(caps.supports_blocking);
+        assert!(caps.supports_timeout);
+        assert!(!caps.is_adaptive);
+        assert_eq!(caps.implementation_name, "crossbeam::channel::bounded");
+    }
+
+    #[test]
+    fn test_queue_capabilities_priority_queue() {
+        let caps = QueueCapabilities::priority_queue(None);
+        assert!(!caps.is_bounded);
+        assert!(caps.capacity.is_none());
+        assert!(!caps.is_lock_free);
+        assert!(!caps.is_wait_free);
+        assert!(caps.supports_priority);
+        assert!(caps.exact_size);
+        assert!(caps.mpmc);
+        assert!(!caps.spsc);
+        assert!(caps.supports_blocking);
+        assert!(caps.supports_timeout);
+        assert!(!caps.is_adaptive);
+        assert_eq!(caps.implementation_name, "PriorityJobQueue");
+    }
+
+    #[test]
+    fn test_queue_capabilities_adaptive() {
+        let caps = QueueCapabilities::adaptive();
+        assert!(!caps.is_bounded);
+        assert!(caps.capacity.is_none());
+        assert!(!caps.is_lock_free);
+        assert!(!caps.is_wait_free);
+        assert!(!caps.supports_priority);
+        assert!(!caps.exact_size);
+        assert!(caps.mpmc);
+        assert!(!caps.spsc);
+        assert!(caps.supports_blocking);
+        assert!(caps.supports_timeout);
+        assert!(caps.is_adaptive);
+        assert_eq!(caps.implementation_name, "AdaptiveQueue");
+    }
+
+    #[test]
+    fn test_queue_capabilities_describe() {
+        let caps = QueueCapabilities::unbounded_channel();
+        let desc = caps.describe();
+        assert!(desc.contains("crossbeam::channel::unbounded"));
+        assert!(desc.contains("unbounded"));
+        assert!(desc.contains("lock-free"));
+        assert!(desc.contains("mpmc"));
+
+        let caps = QueueCapabilities::bounded_channel(100);
+        let desc = caps.describe();
+        assert!(desc.contains("bounded(100)"));
+
+        let caps = QueueCapabilities::priority_queue(None);
+        let desc = caps.describe();
+        assert!(desc.contains("priority"));
+        assert!(desc.contains("exact-size"));
+
+        let caps = QueueCapabilities::adaptive();
+        let desc = caps.describe();
+        assert!(desc.contains("adaptive"));
+    }
+
+    #[test]
+    fn test_queue_capabilities_satisfies() {
+        let caps = QueueCapabilities::unbounded_channel();
+
+        // Should satisfy
+        assert!(caps.satisfies(CapabilityFlags::LOCK_FREE));
+        assert!(caps.satisfies(CapabilityFlags::UNBOUNDED));
+        assert!(caps.satisfies(CapabilityFlags::MPMC));
+        assert!(caps.satisfies(CapabilityFlags::BLOCKING));
+        assert!(caps.satisfies(CapabilityFlags::TIMEOUT));
+        assert!(caps.satisfies(CapabilityFlags::LOCK_FREE | CapabilityFlags::MPMC));
+
+        // Should not satisfy
+        assert!(!caps.satisfies(CapabilityFlags::BOUNDED));
+        assert!(!caps.satisfies(CapabilityFlags::PRIORITY));
+        assert!(!caps.satisfies(CapabilityFlags::WAIT_FREE));
+        assert!(!caps.satisfies(CapabilityFlags::SPSC));
+        assert!(!caps.satisfies(CapabilityFlags::ADAPTIVE));
+        assert!(!caps.satisfies(CapabilityFlags::EXACT_SIZE));
+
+        // Mixed flags - should fail if any required flag is missing
+        assert!(!caps.satisfies(CapabilityFlags::LOCK_FREE | CapabilityFlags::PRIORITY));
+    }
+
+    #[test]
+    fn test_capability_flags_combinations() {
+        let flags = CapabilityFlags::LOCK_FREE | CapabilityFlags::MPMC;
+        assert!(flags.contains(CapabilityFlags::LOCK_FREE));
+        assert!(flags.contains(CapabilityFlags::MPMC));
+        assert!(!flags.contains(CapabilityFlags::BOUNDED));
+
+        let flags =
+            CapabilityFlags::BOUNDED | CapabilityFlags::EXACT_SIZE | CapabilityFlags::PRIORITY;
+        assert!(flags.contains(CapabilityFlags::BOUNDED));
+        assert!(flags.contains(CapabilityFlags::EXACT_SIZE));
+        assert!(flags.contains(CapabilityFlags::PRIORITY));
+    }
+
+    #[test]
+    fn test_require_capabilities_success() {
+        let queue = ChannelQueue::unbounded();
+        assert!(require_capabilities(&queue, CapabilityFlags::LOCK_FREE).is_ok());
+        assert!(require_capabilities(&queue, CapabilityFlags::UNBOUNDED).is_ok());
+        assert!(require_capabilities(&queue, CapabilityFlags::MPMC).is_ok());
+    }
+
+    #[test]
+    fn test_require_capabilities_failure() {
+        let queue = ChannelQueue::unbounded();
+        let result = require_capabilities(&queue, CapabilityFlags::PRIORITY);
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("priority"));
+        assert!(err.to_string().contains("crossbeam::channel::unbounded"));
+    }
+
+    #[test]
+    fn test_missing_capabilities_error_display() {
+        let caps = QueueCapabilities::unbounded_channel();
+        let err = MissingCapabilitiesError {
+            required: CapabilityFlags::PRIORITY | CapabilityFlags::BOUNDED,
+            actual: caps,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("priority"));
+        assert!(msg.contains("bounded"));
+        assert!(msg.contains("crossbeam::channel::unbounded"));
+    }
+
+    #[test]
+    fn test_job_queue_supports() {
+        let queue = ChannelQueue::unbounded();
+        assert!(queue.supports(CapabilityFlags::LOCK_FREE));
+        assert!(queue.supports(CapabilityFlags::MPMC));
+        assert!(!queue.supports(CapabilityFlags::PRIORITY));
+        assert!(!queue.supports(CapabilityFlags::BOUNDED));
     }
 
     #[test]

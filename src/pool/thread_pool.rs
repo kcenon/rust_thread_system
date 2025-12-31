@@ -7,8 +7,8 @@ use crate::pool::worker::{Worker, WorkerStats};
 #[cfg(feature = "priority-scheduling")]
 use crate::queue::PriorityJobQueue;
 use crate::queue::{
-    BackpressureStrategy, BoundedQueue, ChannelQueue, JobQueue, QueueError, QueueFactory,
-    QueueRequirements,
+    BackpressureStrategy, BoundedQueue, CapabilityFlags, ChannelQueue, JobQueue, QueueCapabilities,
+    QueueError, QueueFactory, QueueRequirements,
 };
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -1105,6 +1105,57 @@ impl ThreadPool {
             .as_ref()
             .map(|q| q.len() as u64)
             .unwrap_or(0)
+    }
+
+    /// Returns the capabilities of the underlying queue.
+    ///
+    /// This allows runtime introspection of the queue's characteristics,
+    /// such as whether it's bounded, lock-free, or supports priority scheduling.
+    ///
+    /// Returns `None` if the pool is not running.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use rust_thread_system::prelude::*;
+    ///
+    /// let pool = ThreadPool::with_threads(4)?;
+    /// pool.start()?;
+    ///
+    /// if let Some(caps) = pool.queue_capabilities() {
+    ///     println!("Queue: {}", caps.describe());
+    ///     if caps.is_lock_free {
+    ///         println!("Using lock-free queue for optimal performance");
+    ///     }
+    /// }
+    /// ```
+    pub fn queue_capabilities(&self) -> Option<QueueCapabilities> {
+        self.queue.read().as_ref().map(|q| q.capabilities())
+    }
+
+    /// Checks if the pool's queue supports the required capabilities.
+    ///
+    /// Returns `false` if the pool is not running.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use rust_thread_system::prelude::*;
+    /// use rust_thread_system::queue::CapabilityFlags;
+    ///
+    /// let pool = ThreadPool::with_threads(4)?;
+    /// pool.start()?;
+    ///
+    /// if pool.supports_capabilities(CapabilityFlags::LOCK_FREE | CapabilityFlags::MPMC) {
+    ///     println!("Queue is suitable for high-contention MPMC scenario");
+    /// }
+    /// ```
+    pub fn supports_capabilities(&self, flags: CapabilityFlags) -> bool {
+        self.queue
+            .read()
+            .as_ref()
+            .map(|q| q.supports(flags))
+            .unwrap_or(false)
     }
 
     /// Get statistics for all workers
