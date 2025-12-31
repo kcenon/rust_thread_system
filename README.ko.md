@@ -189,6 +189,66 @@ match pool.execute_timeout(|| {
 pool.shutdown()?;
 ```
 
+### Queue Factory
+
+`QueueFactory`를 사용하여 구현 세부 사항을 이해하지 않고도 요구 사항에 맞는 큐를 생성할 수 있습니다:
+
+```rust
+use rust_thread_system::queue::{QueueFactory, QueueRequirements};
+use std::time::Duration;
+
+// 특정 요구 사항으로 큐 생성
+let queue = QueueFactory::create(
+    QueueRequirements::new()
+        .bounded(1000)
+).unwrap();
+
+// 일반적인 패턴을 위한 편의 메서드 사용
+let high_throughput = QueueFactory::high_throughput();
+let low_latency = QueueFactory::low_latency(500);
+let adaptive = QueueFactory::auto_optimized();
+
+// 특정 사용 사례를 위한 프리셋 사용
+let web_queue = QueueFactory::web_server(5000, Duration::from_secs(30));
+let background_queue = QueueFactory::background_jobs();
+let realtime_queue = QueueFactory::realtime(1000);
+let pipeline_queue = QueueFactory::data_pipeline();
+```
+
+`ThreadPoolConfig`와 프리셋을 사용한 통합:
+
+```rust
+use rust_thread_system::prelude::*;
+use std::time::Duration;
+
+// 웹 서버 프리셋: 타임아웃 백프레셔가 있는 제한된 큐
+let config = ThreadPoolConfig::new(8)
+    .for_web_server(5000, Duration::from_secs(30));
+
+// 백그라운드 작업 프리셋: 우선순위 지원이 있는 무제한 큐
+let config = ThreadPoolConfig::new(4)
+    .for_background_jobs();
+
+// 실시간 프리셋: 즉시 거부가 있는 제한된 큐
+let config = ThreadPoolConfig::new(4)
+    .for_realtime(1000);
+
+// 데이터 파이프라인 프리셋: 가변 부하를 위한 적응형 큐
+let config = ThreadPoolConfig::new(8)
+    .for_data_pipeline();
+
+let pool = ThreadPool::with_config(config)?;
+```
+
+큐 선택 매트릭스:
+
+| 요구 사항 | 선택된 큐 |
+|----------|----------|
+| 기본값 | `ChannelQueue` (무제한) |
+| `bounded(N)` | `BoundedQueue` |
+| `adaptive()` | `AdaptiveQueue` |
+| `with_priority()` | `PriorityJobQueue` |
+
 ### 워커 통계
 
 ```rust
