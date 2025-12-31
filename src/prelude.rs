@@ -6,6 +6,11 @@ pub use crate::core::{
 #[cfg(feature = "priority-scheduling")]
 pub use crate::core::{Priority, PriorityJob, PriorityQueue};
 pub use crate::pool::{ThreadPool, ThreadPoolConfig, WorkerStats};
-pub use crate::queue::{BoundedQueue, ChannelQueue, JobQueue, QueueCapabilities, QueueError, QueueResult};
 #[cfg(feature = "priority-scheduling")]
 pub use crate::queue::PriorityJobQueue;
+pub use crate::queue::{
+    BoundedQueue, ChannelQueue, JobQueue, QueueCapabilities, QueueError, QueueResult,
+};
+pub use crate::typed::{
+    DefaultJobType, JobType, TypeStats, TypedClosureJob, TypedJob, TypedPoolConfig, TypedThreadPool,
+};

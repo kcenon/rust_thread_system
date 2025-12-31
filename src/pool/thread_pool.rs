@@ -1,12 +1,12 @@
 //! Thread pool implementation
 
-use crate::core::{CancellationToken, ClosureJob, Job, JobHandle, Result, ThreadError};
 #[cfg(feature = "priority-scheduling")]
 use crate::core::Priority;
+use crate::core::{CancellationToken, ClosureJob, Job, JobHandle, Result, ThreadError};
 use crate::pool::worker::{Worker, WorkerStats};
-use crate::queue::{BoundedQueue, ChannelQueue, JobQueue, QueueError};
 #[cfg(feature = "priority-scheduling")]
 use crate::queue::PriorityJobQueue;
+use crate::queue::{BoundedQueue, ChannelQueue, JobQueue, QueueError};
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -265,7 +265,10 @@ impl std::fmt::Debug for ThreadPool {
         f.debug_struct("ThreadPool")
             .field("config", &self.config)
             .field("running", &self.running.load(Ordering::Relaxed))
-            .field("total_jobs_submitted", &self.total_jobs_submitted.load(Ordering::Relaxed))
+            .field(
+                "total_jobs_submitted",
+                &self.total_jobs_submitted.load(Ordering::Relaxed),
+            )
             .finish()
     }
 }
@@ -343,11 +346,7 @@ impl ThreadPool {
         // Create workers
         let mut workers = Vec::with_capacity(self.config.num_threads);
         for id in 0..self.config.num_threads {
-            let worker = Worker::new(
-                id,
-                Arc::clone(&queue),
-                self.config.poll_interval,
-            )?;
+            let worker = Worker::new(id, Arc::clone(&queue), self.config.poll_interval)?;
             workers.push(worker);
         }
 
@@ -370,9 +369,7 @@ impl ThreadPool {
 
         queue.send(Box::new(job)).map_err(|e| match e {
             QueueError::Closed(_) => ThreadError::shutting_down(0),
-            QueueError::Full(_) => {
-                ThreadError::queue_full(queue.len(), self.config.max_queue_size)
-            }
+            QueueError::Full(_) => ThreadError::queue_full(queue.len(), self.config.max_queue_size),
             _ => ThreadError::QueueSendError,
         })?;
 
@@ -402,11 +399,7 @@ impl ThreadPool {
     /// pool.submit_with_priority(my_background_job, Priority::Low)?;
     /// ```
     #[cfg(feature = "priority-scheduling")]
-    pub fn submit_with_priority<J: Job + 'static>(
-        &self,
-        job: J,
-        priority: Priority,
-    ) -> Result<()> {
+    pub fn submit_with_priority<J: Job + 'static>(&self, job: J, priority: Priority) -> Result<()> {
         if !self.running.load(Ordering::Acquire) {
             return Err(ThreadError::not_running(&self.config.thread_name_prefix));
         }
@@ -568,9 +561,7 @@ impl ThreadPool {
 
         queue.try_send(Box::new(job)).map_err(|e| match e {
             QueueError::Closed(_) => ThreadError::shutting_down(0),
-            QueueError::Full(_) => {
-                ThreadError::queue_full(queue.len(), self.config.max_queue_size)
-            }
+            QueueError::Full(_) => ThreadError::queue_full(queue.len(), self.config.max_queue_size),
             _ => ThreadError::QueueSendError,
         })?;
 
@@ -639,14 +630,18 @@ impl ThreadPool {
             .as_ref()
             .ok_or_else(|| ThreadError::not_running(&self.config.thread_name_prefix))?;
 
-        queue.send_timeout(Box::new(job), timeout).map_err(|e| match e {
-            QueueError::Closed(_) => ThreadError::shutting_down(0),
-            QueueError::Timeout(_) => ThreadError::submission_timeout(timeout.as_millis() as u64),
-            QueueError::Full(_) => {
-                ThreadError::queue_full(queue.len(), self.config.max_queue_size)
-            }
-            _ => ThreadError::QueueSendError,
-        })?;
+        queue
+            .send_timeout(Box::new(job), timeout)
+            .map_err(|e| match e {
+                QueueError::Closed(_) => ThreadError::shutting_down(0),
+                QueueError::Timeout(_) => {
+                    ThreadError::submission_timeout(timeout.as_millis() as u64)
+                }
+                QueueError::Full(_) => {
+                    ThreadError::queue_full(queue.len(), self.config.max_queue_size)
+                }
+                _ => ThreadError::QueueSendError,
+            })?;
 
         self.total_jobs_submitted.fetch_add(1, Ordering::Relaxed);
         Ok(())
@@ -1263,7 +1258,8 @@ mod tests {
     fn test_custom_queue() {
         // Test using a custom queue via config
         let custom_queue = Arc::new(ChannelQueue::unbounded());
-        let config = ThreadPoolConfig::new(2).with_queue(Arc::clone(&custom_queue) as Arc<dyn JobQueue>);
+        let config =
+            ThreadPoolConfig::new(2).with_queue(Arc::clone(&custom_queue) as Arc<dyn JobQueue>);
 
         let pool = ThreadPool::with_config(config).expect("Failed to create thread pool");
         pool.start().expect("Failed to start pool");
@@ -1319,7 +1315,12 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
 
         // Submit jobs with different priorities
-        for priority in [Priority::Low, Priority::Normal, Priority::High, Priority::Critical] {
+        for priority in [
+            Priority::Low,
+            Priority::Normal,
+            Priority::High,
+            Priority::Critical,
+        ] {
             let counter_clone = Arc::clone(&counter);
             pool.execute_with_priority(
                 move || {
@@ -1362,7 +1363,9 @@ mod tests {
         .expect("Failed to submit blocking job");
 
         // Wait for the blocking job to start
-        started_rx.recv_timeout(Duration::from_secs(5)).expect("Blocking job should start");
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("Blocking job should start");
 
         // Now submit jobs with different priorities - they'll queue up
         let order = Arc::new(Mutex::new(Vec::new()));
