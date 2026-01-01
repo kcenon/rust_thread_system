@@ -14,6 +14,8 @@ default = []
 # Enable priority-based job scheduling (experimental)
 # Note: Not yet integrated with ThreadPool
 priority-scheduling = []
+# Enable tracing integration for observability
+tracing = ["dep:tracing"]
 
 [dependencies]
 crossbeam = "0.8"
@@ -21,10 +23,12 @@ parking_lot = "0.12"
 thiserror = "2.0"
 num_cpus = "1.16"
 bitflags = "2.6"
+tracing = { version = "0.1", optional = true }
 
 [dev-dependencies]
 criterion = "0.5"
 proptest = "1.4"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [[bench]]
 name = "thread_pool_benchmarks"

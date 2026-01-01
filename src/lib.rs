@@ -114,6 +114,8 @@ pub mod core;
 pub mod pool;
 pub mod prelude;
 pub mod queue;
+#[cfg(feature = "tracing")]
+pub mod tracing;
 pub mod typed;
 
 pub use core::{
@@ -134,3 +136,6 @@ pub use queue::{
 pub use typed::{
     DefaultJobType, JobType, TypeStats, TypedClosureJob, TypedJob, TypedPoolConfig, TypedThreadPool,
 };
+
+#[cfg(feature = "tracing")]
+pub use tracing::{metrics as tracing_metrics, TracedJob};

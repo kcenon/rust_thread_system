@@ -9,6 +9,7 @@
 - **Thread Pool 관리**: 설정 가능한 스레드 수를 가진 효율적인 워커 풀
 - **유연한 Job Queue**: 제한된/무제한/적응형 작업 큐 지원
 - **Backpressure 전략**: 큐 가득 참 상황에 대한 설정 가능한 처리 (차단, 타임아웃, 거부, 삭제)
+- **Tracing 통합**: `tracing` 생태계와의 선택적 관찰성 지원 (feature-gated)
 - **계층적 취소 토큰**: 부모-자식 토큰 관계, 연쇄 취소, 타임아웃 및 콜백 지원
 - **워커 통계**: 워커별 및 풀 전체의 포괄적인 메트릭 추적
 - **고성능**: 최적의 성능을 위해 crossbeam 채널과 parking_lot 기반으로 구축
@@ -298,6 +299,73 @@ match require_capabilities(&queue, CapabilityFlags::PRIORITY) {
 | `TIMEOUT` | 타임아웃 작업 지원 |
 | `ADAPTIVE` | 적응형 전략 사용 |
 
+### Tracing 통합
+
+관찰성을 위해 `tracing` feature를 활성화하여 구조화된 로깅, 메트릭, 분산 추적을 사용할 수 있습니다:
+
+```toml
+[dependencies]
+rust_thread_system = { version = "0.1.0", features = ["tracing"] }
+```
+
+tracing subscriber를 설정하고 추적된 작업을 제출:
+
+```rust
+use rust_thread_system::prelude::*;
+use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+
+fn main() -> Result<()> {
+    // tracing subscriber 설정
+    tracing_subscriber::registry()
+        .with(fmt::layer().with_target(true))
+        .with(EnvFilter::from_default_env()
+            .add_directive("rust_thread_system=debug".parse().unwrap()))
+        .init();
+
+    let pool = ThreadPool::with_threads(4)?;
+    pool.start()?;
+
+    // 추적 컨텍스트 전파와 함께 제출
+    tracing::info_span!("my_operation").in_scope(|| {
+        pool.submit_traced(MyJob::new())?;
+        Ok::<_, ThreadError>(())
+    })?;
+
+    pool.shutdown()?;
+    Ok(())
+}
+```
+
+Tracing 기능:
+- **계측된 메서드**: `start()`, `submit()`, `shutdown()`이 `#[instrument]`로 추적됨
+- **컨텍스트 전파**: `submit_traced()`가 현재 span을 캡처하고 전파
+- **워커 span**: 각 워커 스레드에 전용 span
+- **작업 실행 span**: 개별 작업 실행이 타이밍과 함께 추적됨
+- **메트릭 이벤트**: 관찰성 시스템을 위한 카운터, 게이지, 히스토그램
+
+로그 레벨:
+
+| 레벨 | 이벤트 |
+|------|--------|
+| `ERROR` | 작업 패닉 |
+| `WARN` | 작업 실패 |
+| `INFO` | 풀 시작/종료, 설정 |
+| `DEBUG` | 개별 작업 완료, 워커 라이프사이클 |
+| `TRACE` | 작업 제출, 큐 작업, 메트릭 |
+
+`RUST_LOG` 환경 변수로 로깅 제어:
+
+```bash
+# 메트릭을 포함한 모든 이벤트 표시
+RUST_LOG=trace cargo run
+
+# 작업 실행 세부 정보 표시
+RUST_LOG=rust_thread_system=debug cargo run
+
+# 풀 라이프사이클만 표시
+RUST_LOG=rust_thread_system=info cargo run
+```
+
 ### 워커 통계
 
 ```rust
@@ -329,6 +397,9 @@ println!("Total jobs failed: {}", pool.total_jobs_failed());
 - **basic_usage.rs**: 클로저를 사용한 간단한 thread pool 사용법
 - **custom_jobs.rs**: 커스텀 작업 타입 구현
 - **bounded_queue.rs**: 메모리 사용량을 제한하기 위한 제한된 큐 사용
+- **typed_pool.rs**: 타입별 라우팅을 사용하는 typed thread pool
+- **custom_job_type.rs**: 도메인별 분류를 위한 커스텀 작업 타입 정의
+- **tracing_example.rs**: 관찰성을 위한 tracing 통합 (`tracing` feature 필요)
 
 예제 실행:
 
@@ -336,6 +407,9 @@ println!("Total jobs failed: {}", pool.total_jobs_failed());
 cargo run --example basic_usage
 cargo run --example custom_jobs
 cargo run --example bounded_queue
+cargo run --example typed_pool
+cargo run --example custom_job_type
+cargo run --example tracing_example --features tracing
 ```
 
 ## 성능 특성
@@ -408,6 +482,7 @@ pub enum ThreadError {
 - **parking_lot**: 더 빠른 동기화 프리미티브
 - **thiserror**: 인체공학적인 오류 처리
 - **num_cpus**: CPU 개수 감지
+- **tracing** (선택적): 구조화된 로깅 및 분산 추적
 
 ## 라이선스
 

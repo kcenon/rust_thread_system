@@ -8,6 +8,9 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+#[cfg(feature = "tracing")]
+use tracing::{debug, span, Level};
+
 /// Statistics for a worker thread
 #[derive(Debug, Default)]
 pub struct WorkerStats {
@@ -139,10 +142,24 @@ impl Worker {
     /// Workers process jobs from the queue until it is closed and empty.
     /// This ensures all queued jobs are processed before shutdown.
     fn run(id: usize, queue: Arc<dyn JobQueue>, stats: Arc<WorkerStats>, poll_interval: Duration) {
+        #[cfg(feature = "tracing")]
+        let worker_span = span!(Level::DEBUG, "worker", id = id);
+        #[cfg(feature = "tracing")]
+        let _guard = worker_span.enter();
+
+        #[cfg(feature = "tracing")]
+        debug!("worker started");
+
         loop {
             match queue.recv_timeout(poll_interval) {
                 Ok(mut job) => {
+                    #[cfg(feature = "tracing")]
+                    crate::tracing::metrics::record_worker_busy(id);
+
                     Self::execute_job(id, &mut job, &stats);
+
+                    #[cfg(feature = "tracing")]
+                    crate::tracing::metrics::record_worker_idle(id);
                 }
                 Err(QueueError::Empty) => {
                     // No job available within timeout, continue polling
@@ -150,6 +167,12 @@ impl Worker {
                 }
                 Err(QueueError::Disconnected) => {
                     // Queue closed and empty, shutdown
+                    #[cfg(feature = "tracing")]
+                    debug!(
+                        jobs_processed = stats.get_jobs_processed(),
+                        jobs_failed = stats.get_jobs_failed(),
+                        "worker shutting down"
+                    );
                     break;
                 }
                 Err(_) => {
@@ -161,19 +184,46 @@ impl Worker {
     }
 
     /// Execute a single job with panic protection
+    #[allow(unused_variables)]
     fn execute_job(id: usize, job: &mut BoxedJob, stats: &WorkerStats) {
+        #[cfg(feature = "tracing")]
+        let job_type = job.job_type();
+
+        #[cfg(feature = "tracing")]
+        let job_span = span!(Level::DEBUG, "job_execution", job_type = job_type);
+        #[cfg(feature = "tracing")]
+        let _job_guard = job_span.enter();
+
         let start = std::time::Instant::now();
 
         // Execute the job with panic protection
         let panic_result = catch_unwind(AssertUnwindSafe(|| job.execute()));
 
+        let elapsed = start.elapsed();
+        let elapsed_us = elapsed.as_micros() as u64;
+
         match panic_result {
             Ok(Ok(())) => {
                 // Job completed successfully
                 stats.increment_processed();
+                #[cfg(feature = "tracing")]
+                {
+                    debug!(duration_ms = elapsed.as_millis() as u64, "job completed");
+                    crate::tracing::metrics::record_completion(elapsed, true);
+                }
             }
             Ok(Err(e)) => {
                 // Job returned an error
+                #[cfg(feature = "tracing")]
+                {
+                    tracing::warn!(
+                        error = %e,
+                        duration_ms = elapsed.as_millis() as u64,
+                        "job failed"
+                    );
+                    crate::tracing::metrics::record_completion(elapsed, false);
+                }
+                #[cfg(not(feature = "tracing"))]
                 eprintln!("Worker {}: Job execution failed: {}", id, e);
                 stats.increment_failed();
             }
@@ -186,13 +236,22 @@ impl Worker {
                 } else {
                     "Unknown panic".to_string()
                 };
+                #[cfg(feature = "tracing")]
+                {
+                    tracing::error!(
+                        panic_message = %panic_msg,
+                        duration_ms = elapsed.as_millis() as u64,
+                        "job panicked"
+                    );
+                    crate::tracing::metrics::record_panic(elapsed);
+                }
+                #[cfg(not(feature = "tracing"))]
                 eprintln!("Worker {}: Job panicked: {}", id, panic_msg);
                 stats.increment_panicked();
             }
         }
 
-        let elapsed = start.elapsed().as_micros() as u64;
-        stats.add_processing_time(elapsed);
+        stats.add_processing_time(elapsed_us);
     }
 }
 

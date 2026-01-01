@@ -19,6 +19,7 @@ A production-ready, high-performance Rust threading framework with worker pools 
 - **Pluggable Queue Implementations**: Custom queues via `JobQueue` trait
 - **Backpressure Strategies**: Configurable handling for queue-full scenarios (block, timeout, reject, drop)
 - **Priority Scheduling**: Optional priority-based job execution (feature-gated)
+- **Tracing Integration**: Optional observability with the `tracing` ecosystem (feature-gated)
 - **Hierarchical Cancellation**: Parent-child token relationships with cascading cancellation, timeout support, and callbacks
 - **Worker Statistics**: Comprehensive metrics tracking per worker and pool-wide
 - **High Performance**: Built on crossbeam channels and parking_lot for optimal performance
@@ -474,6 +475,73 @@ Priority levels (highest to lowest):
 
 Within the same priority level, jobs are processed in FIFO order.
 
+### Tracing Integration
+
+Enable the `tracing` feature for observability with structured logging, metrics, and distributed tracing:
+
+```toml
+[dependencies]
+rust_thread_system = { version = "0.1.0", features = ["tracing"] }
+```
+
+Set up tracing subscriber and submit traced jobs:
+
+```rust
+use rust_thread_system::prelude::*;
+use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+
+fn main() -> Result<()> {
+    // Set up tracing subscriber
+    tracing_subscriber::registry()
+        .with(fmt::layer().with_target(true))
+        .with(EnvFilter::from_default_env()
+            .add_directive("rust_thread_system=debug".parse().unwrap()))
+        .init();
+
+    let pool = ThreadPool::with_threads(4)?;
+    pool.start()?;
+
+    // Submit with tracing context propagation
+    tracing::info_span!("my_operation").in_scope(|| {
+        pool.submit_traced(MyJob::new())?;
+        Ok::<_, ThreadError>(())
+    })?;
+
+    pool.shutdown()?;
+    Ok(())
+}
+```
+
+Tracing features:
+- **Instrumented methods**: `start()`, `submit()`, `shutdown()` are traced with `#[instrument]`
+- **Context propagation**: `submit_traced()` captures and propagates the current span
+- **Worker spans**: Each worker thread has a dedicated span
+- **Job execution spans**: Individual job executions are traced with timing
+- **Metrics events**: Counters, gauges, and histograms for observability systems
+
+Log levels:
+
+| Level | Events |
+|-------|--------|
+| `ERROR` | Job panics |
+| `WARN` | Job failures |
+| `INFO` | Pool start/shutdown, configuration |
+| `DEBUG` | Individual job completion, worker lifecycle |
+| `TRACE` | Job submission, queue operations, metrics |
+
+Control logging with `RUST_LOG` environment variable:
+
+```bash
+# Show all events including metrics
+RUST_LOG=trace cargo run
+
+# Show job execution details
+RUST_LOG=rust_thread_system=debug cargo run
+
+# Show only pool lifecycle
+RUST_LOG=rust_thread_system=info cargo run
+```
+
 ### Typed Thread Pool
 
 For applications that need per-type QoS guarantees, use `TypedThreadPool`:
@@ -666,6 +734,7 @@ The `examples/` directory contains several complete examples:
 - **bounded_queue.rs**: Using bounded queues to limit memory usage
 - **typed_pool.rs**: Using typed thread pool with per-type routing
 - **custom_job_type.rs**: Defining custom job types for domain-specific categorization
+- **tracing_example.rs**: Tracing integration with observability (requires `tracing` feature)
 
 Run an example:
 
@@ -675,6 +744,7 @@ cargo run --example custom_jobs
 cargo run --example bounded_queue
 cargo run --example typed_pool
 cargo run --example custom_job_type
+cargo run --example tracing_example --features tracing
 ```
 
 ## Performance Characteristics
@@ -791,6 +861,7 @@ All errors implement `std::error::Error` via `thiserror`.
 - **parking_lot**: Faster synchronization primitives
 - **thiserror**: Ergonomic error handling
 - **num_cpus**: CPU count detection
+- **tracing** (optional): Structured logging and distributed tracing
 
 ## License
 
